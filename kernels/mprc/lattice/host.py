@@ -13,10 +13,10 @@ The physics-facing semantic surface is ringkit.physics.gauge, which re-exports t
 import ctypes
 import os
 import subprocess
-from ringkit.kernels.backend import _arch_flags, _BUILD
+from ringkit.kernels.backend import _arch_flags, _BUILD, so_path
 
 _DIR = os.path.dirname(__file__)
-_SO = os.path.join(_BUILD, "gauge.so")
+_SO = so_path("gauge")                    # arch-keyed: x86_64/arm64 interpreters coexist
 _C = os.path.join(_DIR, "gauge.c")
 _U8 = ctypes.POINTER(ctypes.c_uint8)
 _lib = None

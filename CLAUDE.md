@@ -14,15 +14,16 @@ cd .. && python3 -m ringkit.tests.test_<module>  # a single suite
 
 Kernels (C) build on first import via ctypes into `kernels/build/` (gitignored); if a `.so` is
 stale, delete `kernels/build/` and re-import.
-Builds target the **running interpreter's** architecture (`_arch_flags()` in `kernels/backend/__init__.py`) —
-on this machine Python is x86_64 (Rosetta) on an arm64 host, so a plain `cc` build won't load.
+Builds target the **running interpreter's** architecture and are arch-keyed (`<stem>-<machine>.so`),
+so the Rosetta x86_64 dev Python and a native arm64 one coexist. Native run (4x faster C kernels):
+`arch -arm64 /usr/bin/python3 -m ringkit.tests.run_all` — also ALL GREEN.
 
 ## Non-negotiable disciplines (docs/project-governance/CHARTER.md — D1–D10) — break these and the work is wrong
 
 - **D1 Verify by execution.** Never conclude without running it. Every non-trivial claim is
   backed by a test. Prefer exhaustive checks over the 256 ring where feasible.
 - **Multiplier-free semantic layers.** No `*`, `//`, `**`, `/` and **no standard-math imports**
-  (numpy/math/scipy) anywhere under `core/ stats/ linalg/ rnp/ rmath.py collections/ physics/ ml/ nn/ data.py`.
+  (numpy/math/scipy) anywhere under `core/ stats/ linalg/ rnp/ rmath.py rcollections/ physics/ ml/ nn/ data.py`.
   (`ringkit.rnp` / `ringkit.rmath` are our REPLACEMENTS for numpy/math — original names per D10.)
   Use `rn.mul` (shift-add), `rn.ipow`, `rn.mf_floordiv`, `rn.ring_pow`, etc. AST-audit new files:
   `python3 -c "import ast,sys;[print(n.lineno,type(n.op).__name__) for n in ast.walk(ast.parse(open(sys.argv[1]).read())) if isinstance(n,ast.BinOp) and isinstance(n.op,(ast.Mult,ast.FloorDiv,ast.Pow,ast.Div))]" <file>`
@@ -64,15 +65,19 @@ ringkit/
   stats/stats.py     ring_dist, ARCTAN2, circular mean/median, geometric_mean
   rnp/               numpy REPLACEMENT (original name, D10): __init__.py (the surface: rk.rnp /
                      import ringkit.rnp), tensor.py (RingTensor: the package's ndarray, bytearray-backed)
-  collections/       ring-native data structures (placeholder — containers, not math objects)
+  rcollections/      ring-native data structures (placeholder — containers, not math objects;
+                     original name per D10, and never shadow a stdlib module name: a package dir
+                     named `collections` broke stdlib imports for any python run inside the repo)
   physics/           measure.py, qcm.py, gauge.py (SU(256) plaquette + Metropolis + criticality),
                      sim.py (Gauge facade class)
   ml/                autograd.py, tensor_autograd.py (TVar), optim.py, nn.py (low-level), attention.py
   kernels/           [D9 silicon] backend/ (ctypes loader __init__.py + ring_ops.c, zero-copy,
                      Python fallback), mprc/qcm/ (qcm_kernel.c, cache_manifold.c),
-                     mprc/lattice/ (gauge.c + host.py: ctypes host, py reference, float observables), mprc/hpq/ + nvidia/cuda/ + apple/{metal,ml}/ (placeholders),
-                     build/ (compiled .so output, gitignored)
-  tests/             one test_<module>.py each; run_all.py aggregates (17 suites)
+                     mprc/lattice/ (gauge.c + host.py: ctypes host, py reference, float observables),
+                     apple/metal/ (ring_ops.metal + shim.m + host.py: bit-for-bit verified, OPT-IN —
+                     measured slower than C for elementwise; see backend.METAL_MIN), mprc/hpq/ +
+                     nvidia/cuda/ + apple/ml/ (placeholders), build/ (arch-keyed .so, gitignored)
+  tests/             one test_<module>.py each; run_all.py aggregates (18 suites)
   docs/              project-governance/ (SDLC docs: CHARTER.md, SRD.md, ECOSYSTEM_SRD.md,
                      ECOSYSTEM.md, MANIFEST.md)
 
@@ -90,7 +95,7 @@ Every facade object hides ring internals and exposes `.raw` for power users.
 
 ## Status
 
-All 17 suites green. Substrate (core/stats/linalg/rnp/physics/ml/kernels) is production-grade
+All 18 suites green. Substrate (core/stats/linalg/rnp/physics/ml/kernels) is production-grade
 and AST-clean (ops AND float literals — gauge/sim/data brought into compliance 2026-07-12). Facades (`rk.nn`, `rk.data`, `rk.physics`) built and verified with held-out + controls.
 Next candidates: stacked multi-block trained model, rnp-surface polish, top-level quickstart,
 Apple backends (docs/project-governance/APPLE_BACKENDS_SRD.md).

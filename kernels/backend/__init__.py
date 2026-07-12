@@ -1,13 +1,17 @@
 """
-ringkit.kernels.backend — the SILICON layer: C/SIMD elementwise ring ops that operate
-ZERO-COPY on caller-owned C memory (a Python bytearray's buffer). Data lives in the buffer,
-the kernel maintains it — nothing is marshalled through Python lists.
+ringkit.kernels.backend — the SILICON layer: a registry of hardware backends for elementwise
+ring ops, each operating ZERO-COPY (or documented-copy) on caller-owned uint8 buffers.
 
-Charter D9: this layer uses hardware ops on purpose (speed); it is validated bit-for-bit against
-the multiplier-free ring semantics (ringkit.core.native.qsm etc.). If the .so can't build/load
-(no C compiler / wrong arch) it falls back to a pure-Python loop over the same buffer.
+Charter D9: this layer uses hardware ops on purpose; every backend must reproduce the
+multiplier-free ring semantics (ringkit.core.native.qsm etc.) BIT-FOR-BIT before it may serve.
+A backend becomes eligible only after passing a load-time self-test against the pure-Python
+reference; ineligible or absent backends fall through silently (available via `backends()`).
 
-Kernels: ring_mul/add/sub (auto-vectorized) and ring_*_u64 (explicit 64-lane unroll; 256 = 4x64).
+Registry (probe order): metal (kernels/apple/metal, large buffers only) -> cpu-c (ring_ops.c,
+SIMD) -> python (reference loop). `active(n)` reports which backend serves a buffer of size n.
+
+Build artifacts are ARCH-KEYED (ring_ops-<machine>.so) so an x86_64 (Rosetta) and a native
+arm64 interpreter can share kernels/build/ without clobbering each other.
 """
 import ctypes
 import os
@@ -16,18 +20,34 @@ import subprocess
 
 _DIR = os.path.dirname(__file__)
 _BUILD = os.path.join(_DIR, "..", "build")          # all compiled kernels land in kernels/build/
-_SO = os.path.join(_BUILD, "ring_ops.so")
 _C = os.path.join(_DIR, "ring_ops.c")
 _U8 = ctypes.POINTER(ctypes.c_uint8)
 _NAMES = ("ring_mul", "ring_add", "ring_sub", "ring_mul_u64", "ring_add_u64", "ring_sub_u64")
+
+# Metal auto-routing is OFF by default (METAL_MIN = None): measured 2026-07-12 on M1 Pro,
+# C SIMD wins the elementwise trio at EVERY size (6.5 GMUPS vs ~0.95 GMUPS at 2^24) because
+# these ops are bandwidth-trivial and the GPU path pays 3 buffer copies per call. The backend
+# stays registered + bit-for-bit verified for experiments (set METAL_MIN to an int to route
+# buffers >= that size); Metal's win condition is compute-dense kernels (gauge stencil, fused
+# chains that stay GPU-resident), not single elementwise passes.
+METAL_MIN = None
+
 _lib = None
 _tried = False
+_metal = None
+_metal_tried = False
+
+
+def so_path(stem):
+    """Arch-keyed artifact path: kernels/build/<stem>-<machine>.so (x86_64 and arm64 coexist)."""
+    return os.path.join(_BUILD, f"{stem}-{platform.machine()}.so")
+
+
+_SO = so_path("ring_ops")
 
 
 def build():
-    """Compile ring_ops.c -> ring_ops.so (-O3, SIMD) for THIS interpreter's architecture.
-    On macOS the running Python may be x86_64 (Rosetta) while cc targets arm64 by default,
-    so we pass -arch explicitly; -march=native only when host and target arch match. Raises on failure."""
+    """Compile ring_ops.c for THIS interpreter's architecture. Raises on failure."""
     os.makedirs(_BUILD, exist_ok=True)
     subprocess.run(["cc", "-O3", "-funroll-loops", "-shared", "-fPIC",
                     *_arch_flags(), "-o", _SO, _C], check=True)
@@ -57,15 +77,68 @@ def _load():
             fn = getattr(lib, name)
             fn.argtypes = [_U8, _U8, _U8, ctypes.c_long]
             fn.restype = None
+        if not _selftest(lambda op, out, a, b, n: getattr(lib, op)(_ptr(out), _ptr(a), _ptr(b), n)):
+            _lib = None
+            return None
         _lib = lib
     except Exception:
         _lib = None
     return _lib
 
 
+def _load_metal():
+    global _metal, _metal_tried
+    if _metal is not None or _metal_tried:
+        return _metal
+    _metal_tried = True
+    try:
+        from ringkit.kernels.apple.metal import host as mh
+        if not mh.available():
+            return None
+        if not _selftest(lambda op, out, a, b, n: mh.elementwise(op, out, a, b, n)):
+            return None
+        _metal = mh
+    except Exception:
+        _metal = None
+    return _metal
+
+
+def _selftest(call):
+    """Load-time eligibility gate: the candidate must reproduce the Python reference
+    bit-for-bit on a fixed 256-vector for all three ops. D9's bar, enforced at the door."""
+    a = bytearray(range(256))
+    b = bytearray((i + 89) & 0xFF for i in range(256))          # 89 odd -> hits units + zero-divisors
+    for op in ("ring_mul", "ring_add", "ring_sub"):
+        want = bytearray(_PY[op](a[i], b[i]) for i in range(256))
+        got = bytearray(256)
+        try:
+            call(op, got, a, b, 256)
+        except Exception:
+            return False
+        if got != want:
+            return False
+    return True
+
+
 def available():
-    """True iff the compiled C SIMD path is loaded and usable."""
+    """True iff the compiled C SIMD path is loaded, self-tested, and usable."""
     return _load() is not None
+
+
+def backends():
+    """Status of every registered backend: name -> 'serving' | 'unavailable'."""
+    return {"metal": "serving" if _load_metal() is not None else "unavailable",
+            "cpu-c": "serving" if _load() is not None else "unavailable",
+            "python": "serving"}
+
+
+def active(n=0):
+    """Which backend serves a buffer of `n` elements under the current policy."""
+    if METAL_MIN is not None and n >= METAL_MIN and _load_metal() is not None:
+        return "metal"
+    if _load() is not None:
+        return "cpu-c"
+    return "python"
 
 
 def _ptr(ba):
@@ -81,22 +154,31 @@ _PY = {
 
 
 def elementwise(name, a, b, unroll=False):
-    """Elementwise ring op over two equal-length uint8 buffers -> a NEW bytearray (C-owned mem).
-    `a`, `b` may be bytes/bytearray; inputs are used zero-copy when bytearray. name in ring_mul/add/sub."""
+    """Elementwise ring op over two equal-length uint8 buffers -> a NEW bytearray.
+    `a`, `b` may be bytes/bytearray. name in ring_mul/add/sub. Dispatches by registry policy:
+    metal for >=METAL_MIN elements when eligible, else C SIMD, else the Python reference."""
     n = len(a)
     if len(b) != n:
         raise ValueError(f"backend.{name}: length mismatch {n} vs {len(b)}")
     out = bytearray(n)
-    lib = _load()
-    if lib is None:                                   # pure-Python fallback over the same buffer
-        f = _PY[name.replace("_u64", "")]
-        for i in range(n):
-            out[i] = f(a[i], b[i])
-        return out
+    base = name.replace("_u64", "")
     ab = a if isinstance(a, bytearray) else bytearray(a)
     bb = b if isinstance(b, bytearray) else bytearray(b)
-    fn = getattr(lib, name + ("_u64" if unroll else ""))
-    fn(_ptr(out), _ptr(ab), _ptr(bb), n)
+    which = active(n)
+    if which == "metal":
+        if name.endswith("_u64"):                               # metal has no unroll variants
+            which = "cpu-c" if _load() is not None else "python"
+        elif _metal.elementwise(base, out, ab, bb, n) == 0:
+            return out
+        else:
+            which = "cpu-c" if _load() is not None else "python"    # dispatch failed -> fall through
+    if which == "cpu-c":
+        fn = getattr(_lib, name if name.endswith("_u64") else base)
+        fn(_ptr(out), _ptr(ab), _ptr(bb), n)
+        return out
+    f = _PY[base]                                               # pure-Python reference
+    for i in range(n):
+        out[i] = f(a[i], b[i])
     return out
 
 

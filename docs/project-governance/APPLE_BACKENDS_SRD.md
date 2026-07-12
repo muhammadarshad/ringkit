@@ -1,5 +1,9 @@
 # Apple Backends SRD — Metal + CoreML/ANE (kernels/apple/)
 
+**Status 2026-07-12:** Phase 0 DONE. Phase 1 elementwise DONE (bit-for-bit verified; measured
+slower than C SIMD at every size -> registered opt-in, rationale in backend.METAL_MIN).
+Phase 1b (gauge stencil on Metal) and Phase 2 (CoreML) not started.
+
 Plan to wire the two Apple silicon paths as D9 silicon backends. Charter applies in full:
 hardware ops are legal in these layers, but every kernel must reproduce the Python semantic
 reference **bit-for-bit** before it is trusted (D9), every claim is verified by execution (D1),
@@ -7,14 +11,16 @@ and anything not bit-exact is labeled with its measured bound or rejected (D3/D4
 
 ## Phase 0 — prerequisites
 
-- **Native arm64 Python.** The current interpreter is x86_64 under Rosetta 2
-  (`sysctl.proc_translated=1`). Metal works under Rosetta but ANE dispatch and honest
-  benchmarks need a native toolchain. Acceptance: `platform.machine() == 'arm64'`,
-  full suite green, C-kernel baseline re-measured native (expect >210x figure to move).
-- **Backend registry.** Generalize `kernels/backend` into a probe/dispatch registry:
-  ordered candidates `[metal, cpu-c, python]` per op family; each backend must pass a
-  load-time bit-for-bit self-test on a fixed vector set before it is eligible. Fallback is
-  automatic and silent-but-logged (`backend.active()` reports what's serving).
+- **Native arm64 Python.** DONE (evidence): `/usr/bin/python3` is universal; the full suite
+  runs ALL GREEN natively via `arch -arm64 /usr/bin/python3 -m ringkit.tests.run_all`.
+  Native C-kernel baseline: 22.9 GMUPS vs 5.8 GMUPS under Rosetta (~4x). The dev interpreter
+  is still Rosetta x86_64; switching it remains recommended for daily work.
+  Found + fixed en route: `ringkit/collections` shadowed stdlib `collections` for any python
+  run with CWD inside the repo -> renamed `rcollections` (D10: never mint a stdlib name).
+- **Backend registry.** DONE: `kernels/backend` probes `[metal, cpu-c, python]`; a backend
+  is eligible only after a load-time bit-for-bit self-test (all three ops, fixed vectors);
+  `backend.backends()` / `backend.active(n)` report status and routing. Build artifacts are
+  arch-keyed (`<stem>-<machine>.so`) so Rosetta and native interpreters share kernels/build/.
 
 ## Phase 1 — Metal compute (kernels/apple/metal/)
 
@@ -31,6 +37,13 @@ zero-copy via `MTLBuffer` no-copy wrapping of the same bytearray memory).
      AND >=1M random-buffer elements (same bar test_kernels uses for C);
   2. beats the C SIMD path at >=1M elements or documents why it stays optional;
   3. graceful absence: no Metal device (CI, Linux) -> registry falls through to C.
+- **Elementwise trio result (M1 Pro, measured):** (1) PASSED — exhaustive table + 1M random,
+  from both Rosetta and native interpreters. (2) NOT met and never will be for single
+  elementwise passes: they are bandwidth-trivial and the GPU path pays 3 buffer copies
+  (C 6.5 GMUPS Rosetta / 22.9 native; Metal ~0.7-1.3 GMUPS). Documented optional:
+  auto-routing off (`backend.METAL_MIN = None`). (3) PASSED — test_metal skip-as-pass.
+  **Consequence:** Metal's justification is Phase 1b (gauge stencil: 6-neighbor + LUT work
+  per byte) and fused GPU-resident chains — not elementwise.
 
 ## Phase 2 — CoreML/ANE (kernels/apple/ml/)
 

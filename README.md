@@ -15,7 +15,7 @@ ringkit/
              fit.py        — invert-then-solve exact nonlinear fit
   rnp/       our numpy replacement: __init__.py (rnp surface), tensor.py (RingTensor ndarray)  ★
   rmath.py   our math replacement: sin/cos/exp/log/isqrt + tau/pi/e (ring e = 3)
-  collections/  ring-native data structures (placeholder)
+  rcollections/  ring-native data structures (placeholder)
   stats/     stats.py      — circular mean/median, geometric mean, ring_dist, ARCTAN2
   physics/   measure.py    — ENERGY rulers, measure_sin, overspill table
              qcm.py        — QCM topologies: 4 rings, quadrants, walk, hypervector, manifold
@@ -34,7 +34,7 @@ Every module has input validation + real errors, docstrings, and a test suite th
 numpy-equivalent / oracle ops and verifies ring-internal identities. Run the full suite:
 
 ```
-python3 -m ringkit.tests.run_all      # -> ECOSYSTEM: ALL GREEN (17/17 suites)
+python3 -m ringkit.tests.run_all      # -> ECOSYSTEM: ALL GREEN (18/18 suites)
 ```
 
 - `core/native` — exhaustive over 256 (primitives vs oracle, all trig identities, ADI, codec, errors)
