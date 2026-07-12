@@ -1,15 +1,23 @@
 // ringkit — Metal shim (D9 silicon): a tiny ObjC layer exposing a C ABI for ctypes.
-// Compiles the .metal source at runtime (newLibraryWithSource — no metallib toolchain needed)
-// and dispatches elementwise ring kernels. v1 copies buffers in/out (bytearrays are not
+// Compiles the .metal sources at runtime (newLibraryWithSource — no metallib toolchain needed)
+// and dispatches ring + gauge kernels. Buffers are copied in/out (bytearrays are not
 // page-aligned, so no-copy MTLBuffer wrapping is not possible); the copy cost is measured
-// and documented in tests, not hidden.
+// and documented in tests, not hidden. The gauge sweep runs BOTH parities GPU-resident in
+// one round trip (two ordered encoder passes), so the grid crosses the bus once per sweep.
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 #include <string.h>
 
+#define RK_ABI 3
+
 static id<MTLDevice> g_dev = nil;
 static id<MTLCommandQueue> g_queue = nil;
-static id<MTLComputePipelineState> g_pso[3] = {nil, nil, nil};   // mul, add, sub
+// 0 mul, 1 add, 2 sub, 3 plaquette, 4 metropolis_sweep
+static id<MTLComputePipelineState> g_pso[5] = {nil, nil, nil, nil, nil};
+
+typedef struct { unsigned int W, H, D, parity; } RKGaugeParams;
+
+int rk_metal_abi_version(void) { return RK_ABI; }
 
 int rk_metal_init(const char *src_utf8) {
     @autoreleasepool {
@@ -25,8 +33,9 @@ int rk_metal_init(const char *src_utf8) {
         if (!lib) return -2;
         g_queue = [g_dev newCommandQueue];
         if (!g_queue) return -3;
-        const char *names[3] = {"ring_mul", "ring_add", "ring_sub"};
-        for (int k = 0; k < 3; k++) {
+        const char *names[5] = {"ring_mul", "ring_add", "ring_sub",
+                                "plaquette", "metropolis_sweep"};
+        for (int k = 0; k < 5; k++) {
             id<MTLFunction> fn = [lib newFunctionWithName:
                                   [NSString stringWithUTF8String:names[k]]];
             if (!fn) return -4;
@@ -68,6 +77,118 @@ int rk_metal_elementwise(int op, unsigned char *out,
         [cb waitUntilCompleted];
         if (cb.status != MTLCommandBufferStatusCompleted) return -3;
         memcpy(out, bo.contents, (size_t)n);
+        return 0;
+    }
+}
+
+static void _dispatch3d(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> pso,
+                        long W, long H, long D) {
+    [enc dispatchThreads:MTLSizeMake((NSUInteger)(W - 2), (NSUInteger)(H - 2), (NSUInteger)(D - 2))
+   threadsPerThreadgroup:MTLSizeMake(8, 8, 4)];
+}
+
+// Wilson plaquette over the interior. Returns 0 on success.
+int rk_metal_plaquette(unsigned char *e, const unsigned char *g, long W, long H, long D) {
+    long n = W * H * D;
+    if (!g_pso[3] || W < 3 || H < 3 || D < 3) return -1;
+    @autoreleasepool {
+        id<MTLBuffer> bg = [g_dev newBufferWithBytes:g length:n
+                                             options:MTLResourceStorageModeShared];
+        id<MTLBuffer> be = [g_dev newBufferWithLength:n
+                                              options:MTLResourceStorageModeShared];
+        if (!bg || !be) return -2;
+        RKGaugeParams p = {(unsigned int)W, (unsigned int)H, (unsigned int)D, 0};
+        id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:g_pso[3]];
+        [enc setBuffer:be offset:0 atIndex:0];
+        [enc setBuffer:bg offset:0 atIndex:1];
+        [enc setBytes:&p length:sizeof(p) atIndex:2];
+        _dispatch3d(enc, g_pso[3], W, H, D);
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.status != MTLCommandBufferStatusCompleted) return -3;
+        memcpy(e, be.contents, (size_t)n);
+        return 0;
+    }
+}
+
+// A BATCH of full sweeps, GPU-resident (unified memory): the grid crosses the bus once per
+// batch instead of once per sweep, and all 2*sweeps parity passes queue in ONE command buffer.
+// props/chances are concatenated per-sweep arrays (sweeps * n bytes each).
+int rk_metal_thermalize(unsigned char *grid, const unsigned char *props,
+                        const unsigned char *chances, const unsigned char *lut,
+                        long W, long H, long D, long sweeps) {
+    long n = W * H * D;
+    if (!g_pso[4] || W < 3 || H < 3 || D < 3 || sweeps < 1) return -1;
+    @autoreleasepool {
+        id<MTLBuffer> bgrid = [g_dev newBufferWithBytes:grid length:n
+                                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bprop = [g_dev newBufferWithBytes:props length:n * sweeps
+                                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bchan = [g_dev newBufferWithBytes:chances length:n * sweeps
+                                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> blut = [g_dev newBufferWithBytes:lut length:256
+                                               options:MTLResourceStorageModeShared];
+        if (!bgrid || !bprop || !bchan || !blut) return -2;
+        id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+        for (long s = 0; s < sweeps; s++) {
+            for (unsigned int parity = 0; parity < 2; parity++) {
+                RKGaugeParams p = {(unsigned int)W, (unsigned int)H, (unsigned int)D, parity};
+                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+                [enc setComputePipelineState:g_pso[4]];
+                [enc setBuffer:bgrid offset:0 atIndex:0];
+                [enc setBuffer:bprop offset:(NSUInteger)(s * n) atIndex:1];
+                [enc setBuffer:bchan offset:(NSUInteger)(s * n) atIndex:2];
+                [enc setBuffer:blut offset:0 atIndex:3];
+                [enc setBytes:&p length:sizeof(p) atIndex:4];
+                _dispatch3d(enc, g_pso[4], W, H, D);
+                [enc endEncoding];
+            }
+        }
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.status != MTLCommandBufferStatusCompleted) return -3;
+        memcpy(grid, bgrid.contents, (size_t)n);
+        return 0;
+    }
+}
+
+// One FULL Metropolis sweep (parity 0 then 1) GPU-resident: grid crosses the bus once each way.
+// Ordered encoder passes give the same parity-sequential semantics as the C kernel. Returns 0.
+int rk_metal_gauge_sweep(unsigned char *grid, const unsigned char *prop,
+                         const unsigned char *chance, const unsigned char *lut,
+                         long W, long H, long D) {
+    long n = W * H * D;
+    if (!g_pso[4] || W < 3 || H < 3 || D < 3) return -1;
+    @autoreleasepool {
+        id<MTLBuffer> bgrid = [g_dev newBufferWithBytes:grid length:n
+                                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bprop = [g_dev newBufferWithBytes:prop length:n
+                                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bchan = [g_dev newBufferWithBytes:chance length:n
+                                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> blut = [g_dev newBufferWithBytes:lut length:256
+                                               options:MTLResourceStorageModeShared];
+        if (!bgrid || !bprop || !bchan || !blut) return -2;
+        id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+        for (unsigned int parity = 0; parity < 2; parity++) {
+            RKGaugeParams p = {(unsigned int)W, (unsigned int)H, (unsigned int)D, parity};
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:g_pso[4]];
+            [enc setBuffer:bgrid offset:0 atIndex:0];
+            [enc setBuffer:bprop offset:0 atIndex:1];
+            [enc setBuffer:bchan offset:0 atIndex:2];
+            [enc setBuffer:blut offset:0 atIndex:3];
+            [enc setBytes:&p length:sizeof(p) atIndex:4];
+            _dispatch3d(enc, g_pso[4], W, H, D);
+            [enc endEncoding];
+        }
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.status != MTLCommandBufferStatusCompleted) return -3;
+        memcpy(grid, bgrid.contents, (size_t)n);
         return 0;
     }
 }

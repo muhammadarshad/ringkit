@@ -74,9 +74,11 @@ ringkit/
   kernels/           [D9 silicon] backend/ (ctypes loader __init__.py + ring_ops.c, zero-copy,
                      Python fallback), mprc/qcm/ (qcm_kernel.c, cache_manifold.c),
                      mprc/lattice/ (gauge.c + host.py: ctypes host, py reference, float observables),
-                     apple/metal/ (ring_ops.metal + shim.m + host.py: bit-for-bit verified, OPT-IN —
-                     measured slower than C for elementwise; see backend.METAL_MIN), mprc/hpq/ +
-                     nvidia/cuda/ + apple/ml/ (placeholders), build/ (arch-keyed .so, gitignored)
+                     apple/metal/ (ring_ops+gauge shaders, shim.m, host.py — all bit-for-bit
+                     verified: elementwise OPT-IN [C wins, see backend.METAL_MIN]; gauge sweep AUTO
+                     >=32^3 [2.9-8.4x] + fused GPU-resident thermalize), mprc/hpq/ + nvidia/cuda/ +
+                     apple/ml/ (placeholders; CoreML descoped — unified-GPU focus),
+                     build/ (arch-keyed .so, gitignored)
   tests/             one test_<module>.py each; run_all.py aggregates (18 suites)
   docs/              project-governance/ (SDLC docs: CHARTER.md, SRD.md, ECOSYSTEM_SRD.md,
                      ECOSYSTEM.md, MANIFEST.md)

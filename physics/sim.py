@@ -25,7 +25,7 @@ class Gauge:
         self.beta = int(beta)
         self._rng = _random.Random(seed)
         n = _rn.mul(_rn.mul(self.W, self.H), self.D)
-        self.grid = bytearray(self._rng.randint(0, 255) for _ in range(n))
+        self.grid = bytearray(self._rng.randbytes(n))
 
     def action(self):
         """Mean local action (order parameter): low = ordered/aligned, high = disordered."""
@@ -36,13 +36,18 @@ class Gauge:
         return _gauge.correlation(self.grid, 1, self.W, self.H, self.D)
 
     def thermalize(self, sweeps=40):
-        """Run `sweeps` Metropolis sweeps at the current beta. Mutates the field; returns self."""
+        """Run `sweeps` Metropolis sweeps at the current beta. Mutates the field; returns self.
+        Sweeps run in batches so big lattices stay GPU-resident across the whole batch
+        (unified memory): the grid crosses the bus once per batch, not once per sweep."""
         lut = _gauge.boltzmann_lut(self.beta)
         n = len(self.grid)
-        for _ in range(sweeps):
-            prop = bytearray(self._rng.randint(0, 255) for _ in range(n))
-            chance = bytearray(self._rng.randint(0, 255) for _ in range(n))
-            _gauge.sweep(self.grid, prop, chance, lut, self.W, self.H, self.D)
+        remaining = int(sweeps)
+        while remaining > 0:
+            batch = 8 if remaining > 8 else remaining
+            props = bytearray(self._rng.randbytes(_rn.mul(n, batch)))
+            chances = bytearray(self._rng.randbytes(_rn.mul(n, batch)))
+            _gauge.thermalize(self.grid, props, chances, lut, self.W, self.H, self.D, batch)
+            remaining -= batch
         return self
 
     def plaquette(self):

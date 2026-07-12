@@ -63,6 +63,57 @@ t0 = time.perf_counter(); host.elementwise("ring_mul", out, ra, rb, n); tm = tim
 t0 = time.perf_counter(); lib.ring_mul(backend._ptr(out), backend._ptr(ra), backend._ptr(rb), n); tc = time.perf_counter() - t0
 print(f"    1M mul: metal {n/tm/1e6:.0f} MUPS | cpu-c {n/tc/1e6:.0f} MUPS")
 
+print("== gauge on GPU: bit-for-bit vs C and Python reference (24^3) ==")
+import random
+from ringkit.kernels.mprc.lattice import host as lat
+random.seed(11)
+W = H = D = 24
+gn = W * H * D
+g = bytearray(random.randrange(256) for _ in range(gn))
+e_m = bytearray(gn)
+check("plaquette: metal == C == python",
+      host.plaquette(e_m, g, W, H, D) == 0
+      and e_m == lat.plaquette(g, W, H, D)
+      and bytes(e_m) == bytes(lat.plaquette(g, W, H, D, force_python=True)))
+prop = bytearray(random.randrange(256) for _ in range(gn))
+chance = bytearray(random.randrange(256) for _ in range(gn))
+lut = bytearray(max(0, 255 - d) for d in range(256))
+gm, gc, gp = bytearray(g), bytearray(g), bytearray(g)
+host.gauge_sweep(gm, prop, chance, lut, W, H, D)
+lat.sweep(gc, prop, chance, lut, W, H, D)
+lat.sweep(gp, prop, chance, lut, W, H, D, force_python=True)
+check("full sweep (both parities): metal == C == python", gm == gc == gp)
+
+print("== gauge routing: measured crossover policy ==")
+check("metal passes the lattice-host self-test gate", lat._metal_gauge_ready())
+check("floor is 32^3 (measured: 24^3 C wins, 32^3 metal wins 1.3x -> 8.4x at 160^3)",
+      lat.GAUGE_METAL_MIN_NODES == 1 << 15)
+W2 = H2 = D2 = 32
+n2 = W2 * H2 * D2
+g2 = bytearray(random.randrange(256) for _ in range(n2))
+p2 = bytearray(random.randrange(256) for _ in range(n2))
+c2 = bytearray(random.randrange(256) for _ in range(n2))
+auto, forced = bytearray(g2), bytearray(g2)
+lat.sweep(auto, p2, c2, lut, W2, H2, D2)              # auto-routes to metal at 32^3
+lib2 = lat._load()
+for par in (0, 1):
+    lib2.metropolis_sweep(lat._ptr(forced), lat._ptr(bytearray(p2)), lat._ptr(bytearray(c2)),
+                          lat._ptr(bytearray(lut)), W2, H2, D2, par)
+check("auto-routed sweep result == forced-C result (routing is invisible)", auto == forced)
+
+print("== fused GPU-resident thermalize (unified memory): batch == sequential ==")
+S = 3
+props = bytearray(random.randbytes(n2 * S))
+chances = bytearray(random.randbytes(n2 * S))
+fused, seq = bytearray(g2), bytearray(g2)
+check("fused rc == 0", host.thermalize(fused, props, chances, lut, W2, H2, D2, S) == 0)
+for s in range(S):
+    for par in (0, 1):
+        lib2.metropolis_sweep(lat._ptr(seq), lat._ptr(bytearray(props[s*n2:(s+1)*n2])),
+                              lat._ptr(bytearray(chances[s*n2:(s+1)*n2])),
+                              lat._ptr(bytearray(lut)), W2, H2, D2, par)
+check("fused batch (3 sweeps, 1 bus round-trip) == sequential C", fused == seq)
+
 print()
 print("RESULT:", "ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
 raise SystemExit(0 if not fails else 1)

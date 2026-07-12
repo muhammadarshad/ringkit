@@ -1,8 +1,11 @@
 # Apple Backends SRD — Metal + CoreML/ANE (kernels/apple/)
 
-**Status 2026-07-12:** Phase 0 DONE. Phase 1 elementwise DONE (bit-for-bit verified; measured
-slower than C SIMD at every size -> registered opt-in, rationale in backend.METAL_MIN).
-Phase 1b (gauge stencil on Metal) and Phase 2 (CoreML) not started.
+**Status 2026-07-12:** Phase 0 DONE. Phase 1 elementwise DONE (bit-for-bit; C wins -> opt-in).
+Phase 1b DONE: gauge sweep on Metal AUTO-ROUTES at >=32^3 (measured 2.9x at 48^3 -> 8.4x at
+160^3 vs C), plus fused GPU-resident thermalize (batch of sweeps, grid crosses the bus once
+per batch — unified-memory win). Plaquette measured ~10x slower on GPU (bandwidth-trivial),
+stays on C. Phase 2 (CoreML/ANE) DESCOPED per user direction: the target is the unified-memory
+GPU at CUDA-class throughput, access API irrelevant; ANE/CoreML parked. See Phase 1c roadmap.
 
 Plan to wire the two Apple silicon paths as D9 silicon backends. Charter applies in full:
 hardware ops are legal in these layers, but every kernel must reproduce the Python semantic
@@ -45,7 +48,25 @@ zero-copy via `MTLBuffer` no-copy wrapping of the same bytearray memory).
   **Consequence:** Metal's justification is Phase 1b (gauge stencil: 6-neighbor + LUT work
   per byte) and fused GPU-resident chains — not elementwise.
 
-## Phase 2 — CoreML/ANE (kernels/apple/ml/)
+## Phase 1c — unified-memory GPU roadmap (the CUDA-class push)
+
+Measured on M1 Pro: sweep kernel 1.9-2.9 ns/node on GPU vs ~15.8 C; end-to-end
+Gauge(128^3).thermalize(16) = 2.5x (17.65 -> 7.13 ns/node/sweep) because the CPU-side
+Mersenne RNG now dominates (2 x 33 MB of randoms per 8-sweep batch). Next levers, in order:
+
+1. **GPU-side counter RNG (philox-style)** to kill the RNG bottleneck. This changes the
+   semantic contract (prop/chance become derived, not supplied), so it requires its own
+   Python reference implementation and bit-for-bit gate before it may serve — D9 applies to
+   RNG exactly as to arithmetic. Expected: end-to-end approaches the 6-8x kernel ceiling.
+2. **True zero-copy buffers**: page-aligned grid allocation (mmap) wrapped with
+   newBufferWithBytesNoCopy — UMA means the copy in rk_metal_thermalize is pure waste.
+3. **Persistent GPU session**: keep grid + LUT as living MTLBuffers across facade calls
+   (thermalize -> action -> thermalize), syncing back only on observable reads.
+4. Multi-command-buffer overlap (fill randoms for batch k+1 while batch k runs).
+
+## Phase 2 — CoreML/ANE (kernels/apple/ml/) [DESCOPED 2026-07-12]
+
+Parked per user direction (unified-GPU focus). The plan below is kept for the record.
 
 Serve `rk.nn` inference (solve-trained Linear/Dense, attention routing) through CoreML so
 batched predict can ride the ANE.

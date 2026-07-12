@@ -22,6 +22,13 @@ _U8 = ctypes.POINTER(ctypes.c_uint8)
 _lib = None
 _tried = False
 
+# Metropolis sweeps route to the Metal GPU at/above this node count — measured crossover on
+# M1 Pro (2026-07-12): 24^3 C wins, 32^3 metal wins (2.9x at 48^3 rising to 8.4x at 160^3).
+# The sweep is compute-dense (6-neighbor ring distance + LUT per node), which is Metal's win
+# condition; the bandwidth-trivial plaquette stays on C (metal measured ~10x SLOWER there).
+GAUGE_METAL_MIN_NODES = 1 << 15
+_metal_ok = None                          # D9 gate: metal serves only after a bit-for-bit self-test
+
 
 def build():
     os.makedirs(_BUILD, exist_ok=True)
@@ -111,8 +118,41 @@ def _py_sweep(grid, prop, chance, lut, W, H, D, parity):
                     grid[c] = nv
 
 
+def _metal_gauge_ready():
+    """Load-time eligibility gate for the Metal sweep: bit-for-bit vs the Python reference
+    on a fixed 8^3 lattice, once per process. D9's bar, enforced at the door."""
+    global _metal_ok
+    if _metal_ok is not None:
+        return _metal_ok
+    try:
+        from ringkit.kernels.apple.metal import host as mh
+        if not mh.available():
+            _metal_ok = False
+            return False
+        W = H = D = 8
+        n = W * H * D
+        g = bytearray((i & 0xFF) for i in range(n))
+        prop = bytearray(((i << 3) + 5) & 0xFF for i in range(n))
+        chance = bytearray(((i << 1) + 17) & 0xFF for i in range(n))
+        lut = bytearray(255 - d if d < 255 else 0 for d in range(256))
+        want = bytearray(g)
+        _py_sweep(want, prop, chance, lut, W, H, D, 0)
+        _py_sweep(want, prop, chance, lut, W, H, D, 1)
+        got = bytearray(g)
+        _metal_ok = mh.gauge_sweep(got, prop, chance, lut, W, H, D) == 0 and got == want
+    except Exception:
+        _metal_ok = False
+    return _metal_ok
+
+
 def sweep(grid, prop, chance, lut, W, H, D, force_python=False):
-    """One full Metropolis sweep (both checkerboard parities), in place on `grid` (bytearray)."""
+    """One full Metropolis sweep (both checkerboard parities), in place on `grid` (bytearray).
+    Routes to the Metal GPU for lattices >= GAUGE_METAL_MIN_NODES (measured crossover; falls
+    through to C on any failure), else the C kernel, else the Python reference."""
+    if not force_python and len(grid) >= GAUGE_METAL_MIN_NODES and _metal_gauge_ready():
+        from ringkit.kernels.apple.metal import host as mh
+        if mh.gauge_sweep(grid, prop, chance, lut, W, H, D) == 0:
+            return grid
     lib = None if force_python else _load()
     if lib is None:
         _py_sweep(grid, prop, chance, lut, W, H, D, 0)
@@ -121,6 +161,22 @@ def sweep(grid, prop, chance, lut, W, H, D, force_python=False):
     for parity in (0, 1):
         lib.metropolis_sweep(_ptr(grid), _ptr(bytearray(prop)), _ptr(bytearray(chance)),
                              _ptr(bytearray(lut)), W, H, D, parity)
+    return grid
+
+
+def thermalize(grid, props, chances, lut, W, H, D, sweeps):
+    """Run `sweeps` full sweeps over concatenated per-sweep random arrays (sweeps*n each).
+    Fused GPU path when eligible (floor + metal self-test + 16-byte offset alignment, since
+    per-sweep buffer offsets are s*n); falls back to per-sweep dispatch, same semantics."""
+    n = W * H * D
+    if (sweeps >= 2 and n >= GAUGE_METAL_MIN_NODES and (n & 15) == 0
+            and _metal_gauge_ready()):
+        from ringkit.kernels.apple.metal import host as mh
+        if mh.thermalize(grid, props, chances, lut, W, H, D, sweeps) == 0:
+            return grid
+    for s in range(sweeps):
+        o = s * n
+        sweep(grid, props[o:o + n], chances[o:o + n], lut, W, H, D)
     return grid
 
 
