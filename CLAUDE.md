@@ -115,5 +115,5 @@ Every facade object hides ring internals and exposes `.raw` for power users.
 
 All 20 suites green. Substrate (core/stats/linalg/rnp/physics/ml/kernels) is production-grade
 and AST-clean (ops AND float literals — gauge/sim/data brought into compliance 2026-07-12). Facades (`rk.nn`, `rk.data`, `rk.physics`) built and verified with held-out + controls.
-Next candidates: rnp-surface polish, top-level quickstart. Apple backends: Phases 0-1c
-DONE (docs/project-governance/APPLE_BACKENDS_SRD.md); CoreML descoped.
+Next candidates: rnp-surface polish. Quickstart DONE (README, identity-first per D11, all
+snippets executed). Apple backends Phases 0-1c DONE (APPLE_BACKENDS_SRD.md); CoreML descoped.
