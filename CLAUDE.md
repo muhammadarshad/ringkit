@@ -74,8 +74,10 @@ ringkit/
   rcollections/      ring-native data structures (placeholder — containers, not math objects;
                      original name per D10, and never shadow a stdlib module name: a package dir
                      named `collections` broke stdlib imports for any python run inside the repo)
-  physics/           measure.py, qcm.py, gauge.py (SU(256) plaquette + Metropolis + criticality),
-                     sim.py (Gauge facade class)
+  physics/           measure.py (+ Born-rule cloud/collapse: ring Gaussian by odd-step geometric
+                     decay), qcm.py (+ stride7_orbit: 36-bin vacuum-avoiding QCM walk), gauge.py
+                     (EXPONENTIAL integer Boltzmann [geometric decay — the physics form], criticality
+                     + mass_gap_scan), sim.py (Gauge facade: thermalize/action/order/profile/phase)
   ml/                autograd.py, tensor_autograd.py (TVar), optim.py, nn.py (low-level), attention.py
   kernels/           [D9 silicon] backend/ (ctypes loader __init__.py + ring_ops.c, zero-copy,
                      Python fallback; gemm.py + ring_gemm.c: ring GEMM in 3 gated variants —

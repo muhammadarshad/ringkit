@@ -349,6 +349,28 @@ def correlation(grid, R, W, H, D):
     return tot / (n * 128) if n else 0.0
 
 
+# Confinement reading on the C(R) profile — MEASUREMENT constants (this layer owns float
+# IO). Our correlation normalizes RANDOM alignment to 0.5 (the sources' <cos> maps it to 0),
+# so the mass-gap signature is the EXCESS over 0.5 dying out: confined = no alignment
+# beyond random by R = PHASE_R; deconfined = long-range excess persists.
+PHASE_R = 5
+PHASE_EXCESS_BELOW = 0.05
+
+
+def correlation_profile(grid, W, H, D, rmax=10):
+    """C(R) for R = 1..rmax — the mass-gap observable (QCM paper's main physics readout).
+    Float MEASUREMENT outputs (IO)."""
+    return [correlation(grid, R, W, H, D) for R in range(1, int(rmax) + 1)]
+
+
+def phase_of(profile):
+    """Read the phase from a C(R) profile: 'confined' if the alignment EXCESS over the
+    random baseline (0.5) has died by R=PHASE_R (mass gap), else 'deconfined'. A labeled
+    measurement interpretation, not a ring value."""
+    R = min(PHASE_R, len(profile))
+    return "confined" if profile[R - 1] - 0.5 < PHASE_EXCESS_BELOW else "deconfined"
+
+
 def mean_action(grid, W, H, D):
     """Average local ring-action (sum of neighbor ring-distances) — order parameter.
     Low = ordered/aligned (cold), high = disordered (hot). Float MEASUREMENT output (IO)."""

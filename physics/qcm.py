@@ -22,6 +22,28 @@ from ringkit.core import native as rn
 from ringkit.core.constants import TAU, VACUUMS
 QUADRANTS = ("UP+", "UP-", "DN+", "DN-")
 
+# ── the stride-7 orbit (QCM paper form) ──────────────────────────────────────
+# The unique stride satisfying the triple constraint: gcd(7,256)=1 (bijective),
+# 252 mod 7 == 0 (fits the active bins), and the orbit AVOIDS all 4 vacuums.
+# Starting from 7, repeated +7 visits exactly 36 bins (9 per quadrant) before
+# returning: the QCM quantum walk. (The SILIQ seven_prime_walk below is a different,
+# valid lineage: it cycles 7 prime steps to cover all 252 active positions.)
+WALK_STRIDE = 7
+
+
+def stride7_orbit():
+    """The QCM stride-7 walk: the multiples-of-7 sublattice {7, 14, ..., 252} — exactly
+    36 bins (252/7), 9 per quadrant, and NO vacuum is a multiple of 7 (the walk's triple
+    constraint: gcd(7,256)=1, 252 mod 7 == 0, vacuum avoidance). NOT the full cyclic
+    orbit (which, 7 being a unit, would visit all 256 positions)."""
+    seen = []
+    x = WALK_STRIDE
+    while x <= TAU - 4:                    # 252 = the active bins (TAU - the 4 vacuums)
+        seen.append(x)
+        x += WALK_STRIDE
+    return seen
+
+
 # ── QCM node state (SILIQ ALGORITHM.md sec 3.2) ──────────────────────────────
 def spin(d):
     """bit 7 of the phase: 0 = UP, 1 = DOWN."""

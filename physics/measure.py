@@ -82,3 +82,67 @@ def SIN512(phi):
 def layout():
     """Human-readable summary of the measurement rings (hypervector is in ring_qcm)."""
     return {"CORE": CORE, "AXES(XYZU)": AXES, "ACC_OVR": ACC_OVR, "WORKING": WORKING}
+
+
+# ── Born-rule measurement (QCM form) ─────────────────────────────────────────
+# The paper's probability cloud: P(b|x) ~ exp(-d_circ(x,b)^2 / 2 sigma^2) — the Green's
+# function of imaginary-time Schrodinger on the discrete circle. Ring-native build: a
+# Gaussian is a geometric decay STEPPED BY ODD NUMBERS, because squares grow by odds
+# (d^2 = 1 + 3 + 5 + ... + (2d-1)) — the same accumulation identity behind _SQ and QSM.
+# So w[d] = w[d-1] * f^(2d-1), all fixed-point rn.mul + shifts: no float exp, no float
+# sigma. The width knob is `f` itself (the per-unit decay factor, 0 < f < 256, /256
+# fixed-point) — like beta in the Boltzmann LUT, f IS the thermodynamic-style parameter.
+
+def born_weights(f, peak=255):
+    """Integer Born weights over ring distance: w[d] = floor(peak * (f/256)^(d^2)) for
+    d = 0..128 (the ring's maximum circular distance). w[0] = peak; larger f = wider cloud.
+    Built by odd-step geometric decay (multiplier-free)."""
+    f = int(f)
+    if not (0 < f < 256):
+        raise ValueError(f"born_weights: f must be in (0, 256), got {f}")
+    w = [0 for _ in range(129)]
+    acc = int(peak) << 8                    # fixed-point accumulator
+    w[0] = acc >> 8
+    for d in range(1, 129):
+        step = 0
+        odd = d + d - 1                     # d^2 - (d-1)^2
+        while step < odd and (acc >> 8):    # multiply by f, (2d-1) times
+            acc = rn.mul(acc, f) >> 8
+            step += 1
+        w[d] = acc >> 8
+        if w[d] == 0:                       # cloud has died: the tail stays zero
+            break
+    return w
+
+
+def born_cloud(x, f, peak=255):
+    """The measurement cloud around position x: a 256-entry integer weight table,
+    cloud[b] = born_weights(f)[ring_dist(x, b)]. Symmetric, peaked at x, vacuum-agnostic
+    (weights depend only on distance; vacuums keep their structural role elsewhere)."""
+    w = born_weights(f, peak)
+    x = int(x) & 0xFF
+    cloud = [0 for _ in range(256)]
+    for b in range(256):
+        d = (b - x) & 0xFF
+        d = d if d < 256 - d else 256 - d
+        cloud[b] = w[d]
+    return cloud
+
+
+def born_collapse(x, f, chance):
+    """One measurement: collapse the cloud around x to a definite bin using an integer
+    `chance` (0..total-1, e.g. from the counter RNG). Deterministic given (x, f, chance):
+    walks the cumulative cloud — accumulation again — and returns the selected bin."""
+    cloud = born_cloud(x, f)
+    total = 0
+    for wv in cloud:
+        total += wv
+    if total == 0:
+        return int(x) & 0xFF
+    c = int(chance) % total
+    acc = 0
+    for b in range(256):
+        acc += cloud[b]
+        if c < acc:
+            return b
+    return int(x) & 0xFF

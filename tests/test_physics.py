@@ -40,5 +40,25 @@ check("N=3 tree", (N+1)**2 == 16 and 16*(N*N-1) == 128 and (2*N)**2 == 36 and 25
 check("252 = 4x7x9, 113 = 7D+1", 4*7*9 == 252 and 7*16+1 == 113 and math.gcd(113,256) == 1)
 check("stride-7 = 36 bins, 9/quadrant", (lambda o: len(set(o))==36 and all(sum(1 for x in o if lo<=x<=hi)==9 for lo,hi in [(1,63),(65,127),(129,191),(193,255)]))([(7*k)&0xFF for k in range(1,37)]))
 
+print("== QCM stride-7 walk (the paper form) ==")
+orb = qcm.stride7_orbit()
+check("36 bins, 9 per quadrant", len(orb) == 36
+      and all(sum(1 for x in orb if q*64 <= x < (q+1)*64) == 9 for q in range(4)))
+check("avoids all vacuums; all multiples of 7",
+      not (set(orb) & qcm.VACUUMS) and all((x - rn.mul(rn.mf_floordiv(x, 7), 7)) == 0 for x in orb))
+
+print("== Born-rule measurement (ring Gaussian by odd-step geometric decay) ==")
+from ringkit.physics import measure as _ms
+w = _ms.born_weights(200)
+check("peak at d=0, monotone decay over distance",
+      w[0] == 255 and all(w[d+1] <= w[d] for d in range(128)))
+cloud = _ms.born_cloud(100, 200)
+check("cloud symmetric about x", all(cloud[(100+d) & 0xFF] == cloud[(100-d) & 0xFF]
+                                     for d in range(1, 128)))
+check("collapse is deterministic and lands near x",
+      all(abs(((_ms.born_collapse(100, 200, c) - 100 + 128) & 0xFF) - 128) <= 8
+          for c in (0, 999, 5000, 12345)))
+check("born_weights: bad width -> ValueError", raises(ValueError, lambda: _ms.born_weights(0)))
+
 print()
 print("RESULT:", "ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")

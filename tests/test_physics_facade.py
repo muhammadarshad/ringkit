@@ -38,5 +38,17 @@ print("== escape hatch ==")
 check("raw exposes grid/beta/shape", set(g.raw.keys()) == {"grid", "beta", "shape"})
 check("repr is informative", "Gauge(" in repr(g))
 
+print("== mass gap: C(R) profile + phase reading ==")
+# coarsening physics: order grows with equilibration time (the GPU makes 200 sweeps free)
+gc = rk.physics.Gauge(size=(20, 20, 20), beta=60, seed=2).thermalize(200)
+gh = rk.physics.Gauge(size=(20, 20, 20), beta=0, seed=2).thermalize(200)
+pc, ph_ = gc.profile(6), gh.profile(6)
+print(f"    cold C(R): {[round(v, 3) for v in pc]} -> {gc.phase()}")
+print(f"    hot  C(R): {[round(v, 3) for v in ph_]} -> {gh.phase()}")
+check("cold: long-range excess persists -> deconfined", gc.phase() == "deconfined")
+check("hot: alignment excess dead (mass gap) -> confined", gh.phase() == "confined")
+check("cold profile decays but stays above random baseline",
+      all(pc[i+1] <= pc[i] + 0.02 for i in range(len(pc)-1)) and pc[-1] > 0.52)
+
 print()
 print("RESULT:", "ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")

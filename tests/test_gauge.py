@@ -53,6 +53,20 @@ g0 = bytearray(random.randint(0, 255) for _ in range(n))
 prop = bytearray(random.randint(0, 255) for _ in range(n))
 chance = bytearray(random.randint(0, 255) for _ in range(n))
 lut = gauge.boltzmann_lut(beta=40)                       # cold
+
+# the exponential form's own identities (SOURCES_MAP job 1)
+from ringkit.core import native as _rn
+_f = 256 - 40
+_acc = 255 << 8
+_ok = True
+for _d in range(256):
+    _ok = _ok and lut[_d] == (_acc >> 8)
+    _acc = _rn.mul(_acc, _f) >> 8
+check("boltzmann: geometric-decay construction identity (exhaustive)", _ok)
+check("boltzmann: monotone non-increasing", all(lut[d+1] <= lut[d] for d in range(255)))
+check("boltzmann: beta=0 accepts everything", all(v == 255 for v in gauge.boltzmann_lut(0)))
+check("boltzmann: beta out of range -> ValueError",
+      raises(ValueError, lambda: gauge.boltzmann_lut(300)))
 # C == Python (identical rng inputs), one sweep bit-for-bit
 gc, gp = bytearray(g0), bytearray(g0)
 gauge.sweep(gc, prop, chance, lut, Ws, Hs, Ds, force_python=False)

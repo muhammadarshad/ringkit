@@ -56,18 +56,24 @@ this map records what the full sources state, what ringkit has, and the derived 
 
 ## Derived job queue (D11: each job's form stated before build)
 
-1. **Boltzmann acceptance form (THE live problem).** ringkit's linear LUT (255 - beta*dS)
+1. **DONE 2026-07-12 — Boltzmann acceptance form.** ringkit's linear LUT (255 - beta*dS)
    is not e^{-beta dS}: the chain's stationary measure is not Boltzmann — detailed balance
    broken vs the stated physics. Ring-native fix: EXPONENTIAL decay is GEOMETRIC decay —
    lut[dS+1] = (lut[dS] * f) >> s built by repeated fixed-point rn.mul (multiplier-free,
    integer-only, no float exp anywhere). State the form, verify monotonicity + ratio
    property exhaustively, re-locate ringkit's integer-beta critical point, update tests.
-2. **Multi-R correlation + mass-gap labeling** in criticality_scan (C(R), R=1..10;
-   confined/deconfined phase tagging) — the sources' main physics observable.
-3. **Stride-7 orbit walk** (QCM form) alongside the SILIQ 7-prime walk in qcm.py, labeled.
+2. **DONE — multi-R correlation + mass gap**: correlation_profile(C(R)) + phase_of (the
+   excess-over-0.5 reading — our normalization maps random to 0.5, the sources' <cos> to 0),
+   Gauge.profile()/Gauge.phase(), gauge.mass_gap_scan(). Verified: cold deconfined with
+   persistent excess, hot confined at baseline.
+3. **DONE — stride-7 orbit walk** (qcm.stride7_orbit): the multiples-of-7 sublattice
+   {7..252} — 36 bins, 9 per quadrant, vacuum-avoiding — NOT the full cyclic orbit (7 is a
+   unit; the naive orbit visits all 256 — caught by D1 execution).
 4. **Weyl-hash PRNG paper-fidelity mode** (exact spec above) beside rk_mix32, gated.
-5. **Born-rule measurement form** (probability cloud on the ring; integer-native sigma
-   handling to be stated first).
+5. **DONE — Born-rule measurement form** (measure.born_weights/born_cloud/born_collapse):
+   ring Gaussian by ODD-STEP geometric decay (d^2 grows by odds — the same accumulation
+   identity as _SQ/QSM), width knob is the fixed-point factor f itself. Verified: peak,
+   monotone, symmetric, deterministic collapse near x.
 6. **cos-rotor action option** for XY-universality matching against qcm.jl.
 7. **SU(3)/non-abelian path** — biggest and needs a form decision first: float ComplexF32
    matrices are silicon-layer legal (D9) but a ring-native SU analog is the thesis-pure

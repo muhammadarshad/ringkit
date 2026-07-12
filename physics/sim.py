@@ -62,6 +62,14 @@ class Gauge:
         _gauge.thermalize_rng(self.grid, seed, lut, self.W, self.H, self.D, int(sweeps))
         return self
 
+    def profile(self, rmax=10):
+        """C(R) for R=1..rmax — the mass-gap observable (alignment vs distance)."""
+        return _gauge.correlation_profile(self._sync(), self.W, self.H, self.D, rmax)
+
+    def phase(self):
+        """'confined' (mass gap: alignment dead by R=5) or 'deconfined' (long-range order)."""
+        return _gauge.phase_of(self.profile())
+
     def plaquette(self):
         """The Wilson plaquette energy field over the lattice (a bytearray)."""
         return _gauge.plaquette(self._sync(), self.W, self.H, self.D)
