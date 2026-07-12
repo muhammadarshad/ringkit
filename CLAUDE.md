@@ -81,6 +81,9 @@ ringkit/
                      apple/ml/ (placeholders; CoreML descoped — unified-GPU focus),
                      build/ (arch-keyed .so, gitignored)
   tests/             one test_<module>.py each; run_all.py aggregates (18 suites)
+  bench/             apples-to-apples vs numpy/torch (C6 scaffolding — the ONLY place standard
+                     engines may be imported; baselines bit-for-bit gated before timing).
+                     Results: docs/BENCHMARKS.md (GPU thermalize 95-150x vs numpy)
   docs/              project-governance/ (SDLC docs: CHARTER.md, SRD.md, ECOSYSTEM_SRD.md,
                      ECOSYSTEM.md, MANIFEST.md)
 
