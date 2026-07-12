@@ -34,12 +34,15 @@ Every module has input validation + real errors, docstrings, and a test suite th
 numpy-equivalent / oracle ops and verifies ring-internal identities. Run the full suite:
 
 ```
-python3 -m ringkit.tests.run_all      # -> ECOSYSTEM: ALL GREEN (9/9 suites)
+python3 -m ringkit.tests.run_all      # -> ECOSYSTEM: ALL GREEN (17/17 suites)
 ```
 
 - `core/native` — exhaustive over 256 (primitives vs oracle, all trig identities, ADI, codec, errors)
-- `stats`, `core/calculus`, `linalg` (solve/fit), `array` (tensor/numpy), `physics` (measure/qcm), `ml`
-- `kernels` — C SIMD backend == Python reference bit-for-bit, ~371× speedup
+- `core/constants` (frozen ring identity), `rmath` (exhaustive vs core), `stats`, `core/calculus`,
+  `linalg` (solve/fit), `rnp` (tensor + surface), `physics` (measure/qcm/gauge), `ml`, facades
+  (`nn`/`data`/`physics.Gauge`) with held-out generalization + failing controls
+- `kernels` — C SIMD backend == Python reference bit-for-bit (~210x measured under
+  Rosetta emulation; gauge stencil 0.107 ns/node)
 
 **Charter-clean:** whole-package AST audit shows no `*`/`//`/`**` and no standard-math imports in any
 **semantic** layer; the `kernels/` **silicon** layer intentionally uses hardware ops (charter D9),

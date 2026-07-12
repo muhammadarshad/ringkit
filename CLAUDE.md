@@ -55,7 +55,7 @@ run must collapse to chance, and/or a position-only/content-only baseline must f
 ringkit/
   core/constants.py  CORE ring constants (TAU/HALF/Q/Q2/SCALE/VACUUMS/RING_E/IOTA), single-sourced
                      and FROZEN (assignment raises). Never re-declare these in a subgroup — import
-                     them. Subgroup-domain constants (qcm.HV_*, measure rulers, rnp E_*) stay local.
+                     them. Subgroup-domain constants (qcm.HV_*, measure rulers) stay local.
   core/native.py     substrate ISA: Z256 consts, mul/ipow/mf_floordiv, qsm, isqrt, ring_neg,
                      SIN/COS/TAN family, ARC*, iota/IOTA rotor, ring_exp/ring_log/ring_pow (e=3),
                      ring_cis (Euler), rotate/cis_rotate, ADI, codec  — all multiplier-free
@@ -70,9 +70,9 @@ ringkit/
   ml/                autograd.py, tensor_autograd.py (TVar), optim.py, nn.py (low-level), attention.py
   kernels/           [D9 silicon] backend/ (ctypes loader __init__.py + ring_ops.c, zero-copy,
                      Python fallback), mprc/qcm/ (qcm_kernel.c, cache_manifold.c),
-                     mprc/lattice/ (gauge.c), mprc/hpq/ + nvidia/cuda/ + apple/{metal,ml}/ (placeholders),
+                     mprc/lattice/ (gauge.c + host.py: ctypes host, py reference, float observables), mprc/hpq/ + nvidia/cuda/ + apple/{metal,ml}/ (placeholders),
                      build/ (compiled .so output, gitignored)
-  tests/             one test_<module>.py each; run_all.py aggregates (15 suites)
+  tests/             one test_<module>.py each; run_all.py aggregates (17 suites)
   docs/              project-governance/ (SDLC docs: CHARTER.md, SRD.md, ECOSYSTEM_SRD.md,
                      ECOSYSTEM.md, MANIFEST.md)
 
@@ -90,7 +90,7 @@ Every facade object hides ring internals and exposes `.raw` for power users.
 
 ## Status
 
-All 15 suites green. Substrate (core/stats/linalg/rnp/physics/ml/kernels) is production-grade
-and AST-clean. Facades (`rk.nn`, `rk.data`, `rk.physics`) built and verified with held-out + controls.
-Next candidates: stacked multi-block trained model, numpy-surface polish, top-level quickstart.
-Note: `README.md` predates the facade layer / e=3 / attention — refresh it when convenient.
+All 17 suites green. Substrate (core/stats/linalg/rnp/physics/ml/kernels) is production-grade
+and AST-clean (ops AND float literals — gauge/sim/data brought into compliance 2026-07-12). Facades (`rk.nn`, `rk.data`, `rk.physics`) built and verified with held-out + controls.
+Next candidates: stacked multi-block trained model, rnp-surface polish, top-level quickstart,
+Apple backends (docs/project-governance/APPLE_BACKENDS_SRD.md).

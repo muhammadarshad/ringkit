@@ -15,9 +15,6 @@ from ringkit.rnp.tensor import (
 )
 
 from ringkit.core.constants import TAU
-E_TAU = 2.844444444444444444
-E_PI = 1.422222222222222222
-E_PI2 = 0.711111111111111111
 
 # ── creation ──
 def array(data, unit="arc"):

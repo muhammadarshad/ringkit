@@ -12,6 +12,7 @@ specifics — mod-256 wrap, staying off the vacuum boundaries — are handled fo
         ...
 """
 import random as _random
+from fractions import Fraction as _Fraction     # exact integer rationals (IO boundary, not std-math)
 from ringkit.core import native as _rn
 
 
@@ -50,14 +51,17 @@ def one_hot(labels, num_classes):
     return [1 if i == k else 0 for i in range(num_classes)]
 
 
-def split(X, Y=None, test_frac=0.2, seed=0):
+def split(X, Y=None, test_frac=_Fraction(1, 5), seed=0):
     """Shuffle and split into train/test. Returns (Xtr, Xte) or ((Xtr,Ytr),(Xte,Yte)) if Y given."""
     n = len(X)
-    if not (0.0 < test_frac < 1.0):
+    # IO boundary: the engineer's fraction becomes an exact rational; from there the split
+    # count is pure integer ring arithmetic (multiplier-free), never a float product.
+    frac = _Fraction(test_frac).limit_denominator(1000000)
+    if not (0 < frac < 1):
         raise ValueError(f"split: test_frac must be in (0,1), got {test_frac}")
     idx = list(range(n))
     _random.Random(seed).shuffle(idx)
-    n_test = int(n * test_frac)                          # split ratio: ordinary IO, not a ring value
+    n_test = _rn.mf_floordiv(_rn.mul(n, frac.numerator), frac.denominator)
     test_i = set(idx[:n_test])
     Xtr = [X[i] for i in range(n) if i not in test_i]
     Xte = [X[i] for i in range(n) if i in test_i]

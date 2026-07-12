@@ -12,6 +12,7 @@ integer Boltzmann tables, checkerboard parity, and cache-blocked C kernels all r
     scan = rk.physics.Gauge.criticality([0, 8, 16, 32, 64])   # locate the transition
 """
 import random as _random
+from ringkit.core import native as _rn
 from ringkit.physics import gauge as _gauge
 
 
@@ -23,7 +24,7 @@ class Gauge:
         self.W, self.H, self.D = (int(s) for s in size)
         self.beta = int(beta)
         self._rng = _random.Random(seed)
-        n = self.W * self.H * self.D
+        n = _rn.mul(_rn.mul(self.W, self.H), self.D)
         self.grid = bytearray(self._rng.randint(0, 255) for _ in range(n))
 
     def action(self):

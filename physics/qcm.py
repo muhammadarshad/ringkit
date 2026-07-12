@@ -2,7 +2,7 @@
 ring_qcm.py — QCM: the layer that holds the topologies (on ring_native).
 
 Sources (verified this session):
-  - SILIQ (Silicon Lattice Intelligence Quantum), docs/ALGORITHM.md — concrete Z256 ring ops,
+  - SILIQ (Silicon Lattice Intelligence Quantum), SILIQ ALGORITHM.md (external reference, not vendored) — concrete Z256 ring ops,
     bit-encoded state, 7-prime walk, 128x113 hypervector, biopod (manifold) geometry.
   - QCM paper (Zenodo 18883754, abstract) — SU(N_c) lattice gauge, register-forced 8-bit SIMD,
     Weyl-hash PRNG ("dance of quantum & silicon"). NOTE: only the abstract was accessible (the PDF

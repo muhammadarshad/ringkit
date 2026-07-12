@@ -12,7 +12,7 @@ Measurement rings (structural ring-counts, not arbitrary multipliers):
     WORKING = 1536   AXES + ACC_OVR  (full working ring)
 
 NOTE: the HyperVector topology moved to ring_qcm (it's a QCM topology, not measurement) AND was
-corrected: per SILIQ ALGORITHM.md it is 128x113 = 14464 uint8 CELLS = 14464 BYTES (L1-resident),
+corrected: per SILIQ ALGORITHM.md (external reference, not vendored) it is 128x113 = 14464 uint8 CELLS = 14464 BYTES (L1-resident),
 not 1808 (my earlier version wrongly treated 14464 as bits).
 
 Charter: multiplier-free (mul/mf_floordiv/mf_mod/qsm), imports only ring_native.

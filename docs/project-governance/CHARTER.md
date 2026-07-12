@@ -1,7 +1,7 @@
 # Ring-Native Charter — principles, disciplines, constraints
 
 The rules this work is held to. Check every new form against this before it enters the system.
-Status column reflects the current system (`ring_native.py`, `ring_stats.py`) as audited by execution.
+Status column reflects the current system (`core/native.py`, `stats/stats.py`, and layers above) as audited by execution.
 
 ## Prime Directive
 
@@ -15,7 +15,7 @@ Standard math may be used only as an external *reference* to check against — n
 | # | Constraint | Status |
 |---|------------|--------|
 | C1 | **No floats in system code.** Integer only, mod 256 (or the product/codec rings). | HELD — core is int-only |
-| C2 | **No standard-math imports in the system** (no `math`, no `numpy`, no `import` of standard trig). | HELD — `ring_native` imports nothing; `ring_stats` imports only `ring_native` |
+| C2 | **No standard-math imports in the system** (no `math`, no `numpy`, no `import` of standard trig). | HELD — `core/native` imports nothing standard; layers import only ring modules |
 | C3 | **No Euler, no `math.pi`, no `sin/cos` calls.** Rotation = arc shift (ring addition), trig = tables/`_arch`. | HELD |
 | C4 | **Multiplier-free** everywhere (`+ - << >> \| &` and table reads). `*`/`//`/`**` are realized as `mul`/`mf_floordiv`/`ipow` (shift-add). | HELD — NO exceptions |
 | C5 | **Single source of truth per form.** No two live definitions of the same function. | HELD (the old dual-SIN was resolved) |
