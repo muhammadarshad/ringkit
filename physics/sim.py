@@ -26,28 +26,45 @@ class Gauge:
         self._rng = _random.Random(seed)
         n = _rn.mul(_rn.mul(self.W, self.H), self.D)
         self.grid = bytearray(self._rng.randbytes(n))
+        # Persistent GPU session (unified memory): the lattice lives on the device across
+        # calls; self.grid syncs lazily, only when an observable actually reads it.
+        self._sess = _gauge.session_for(self.grid, self.W, self.H, self.D)
+        self._stale = False                       # True -> device copy is newer than self.grid
+
+    def _sync(self):
+        if self._stale and self._sess is not None:
+            if self._sess.read_into(self.grid) != 0:
+                self._sess = None                 # session died: grid still holds last sync
+            self._stale = False
+        return self.grid
 
     def action(self):
         """Mean local action (order parameter): low = ordered/aligned, high = disordered."""
-        return _gauge.mean_action(self.grid, self.W, self.H, self.D)
+        return _gauge.mean_action(self._sync(), self.W, self.H, self.D)
 
     def order(self):
         """Neighbor-alignment order parameter in [0,1]: 1 = ordered, ~0.5 = disordered."""
-        return _gauge.correlation(self.grid, 1, self.W, self.H, self.D)
+        return _gauge.correlation(self._sync(), 1, self.W, self.H, self.D)
 
     def thermalize(self, sweeps=40):
         """Run `sweeps` Metropolis sweeps at the current beta. Mutates the field; returns self.
         Randoms are DERIVED on the compute device (counter RNG, rk_mix32 spec): on the unified-
-        memory GPU only the grid + 256-byte LUT cross the bus for the whole run. The per-call
+        memory GPU only a 256-byte LUT crosses the bus — the lattice stays device-resident in
+        the persistent session, syncing back only when an observable reads it. The per-call
         seed comes from this Gauge's seeded stream, so runs stay reproducible."""
         lut = _gauge.boltzmann_lut(self.beta)
         seed = self._rng.getrandbits(32)
+        if self._sess is not None:
+            if self._sess.thermalize_rng(seed, 0, lut, int(sweeps)) == 0:
+                self._stale = True
+                return self
+            self._sess = None                     # fall through to the routed host path
         _gauge.thermalize_rng(self.grid, seed, lut, self.W, self.H, self.D, int(sweeps))
         return self
 
     def plaquette(self):
         """The Wilson plaquette energy field over the lattice (a bytearray)."""
-        return _gauge.plaquette(self.grid, self.W, self.H, self.D)
+        return _gauge.plaquette(self._sync(), self.W, self.H, self.D)
 
     @staticmethod
     def criticality(betas, size=(10, 10, 10), sweeps=30, seed=0):
@@ -58,7 +75,7 @@ class Gauge:
 
     @property
     def raw(self):
-        return {"grid": self.grid, "beta": self.beta, "shape": (self.W, self.H, self.D)}
+        return {"grid": self._sync(), "beta": self.beta, "shape": (self.W, self.H, self.D)}
 
     def __repr__(self):
         return f"Gauge(shape={(self.W, self.H, self.D)}, beta={self.beta}, action={self.action():.1f})"

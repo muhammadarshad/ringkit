@@ -67,8 +67,14 @@ Mersenne RNG now dominates (2 x 33 MB of randoms per 8-sweep batch). Next levers
    artifacts BEFORE the first CDLL (mtime vs source) — in-process reload never works.
 2. **True zero-copy buffers**: page-aligned grid allocation (mmap) wrapped with
    newBufferWithBytesNoCopy — UMA means the copy in rk_metal_thermalize is pure waste.
-3. **Persistent GPU session**: keep grid + LUT as living MTLBuffers across facade calls
-   (thermalize -> action -> thermalize), syncing back only on observable reads.
+3. **Persistent GPU session — DONE 2026-07-12** (shim ABI 6: session create/thermalize/
+   read/write/free; GaugeSession in metal host; sim.Gauge holds one when eligible and syncs
+   self.grid lazily on observable reads; bit-for-bit == per-call path, gated in test_metal).
+   Measured on mixed workflows (thermalize+action cycles): ~1.9x at 128^3, wash at 64^3 —
+   honest verdict: useful, not dramatic, because the derived RNG had already removed most
+   bus traffic. THE REAL FIND of this item: the observables (mean_action/correlation) were
+   pure-python loops eating ~99% of cycle time (~500 ms at 128^3); they now reduce in C
+   (integer sums, host does the final divide) -> whole cycles dropped ~250x to ~2 ms.
 4. ~~Multi-command-buffer overlap (fill randoms for batch k+1 while batch k runs)~~ —
    OBSOLETE: the derived counter RNG (item 1) removed random uploads entirely; there is
    nothing left to overlap. Kept for the record.

@@ -65,6 +65,14 @@ def _bind(lib):
     lib.plaquette_mt.argtypes = [_U8, _U8, ctypes.c_long, ctypes.c_long, ctypes.c_long,
                                  ctypes.c_int]
     lib.plaquette_mt.restype = None
+    _PL = ctypes.POINTER(ctypes.c_long)
+    for nm in ("action_sums", "correlation_sums"):
+        fn = getattr(lib, nm)
+        fn.argtypes = ([_U8, ctypes.c_long, ctypes.c_long, ctypes.c_long, _PL, _PL]
+                       if nm == "action_sums"
+                       else [_U8, ctypes.c_long, ctypes.c_long, ctypes.c_long, ctypes.c_long,
+                             _PL, _PL])
+        fn.restype = None
     return lib
 
 
@@ -303,10 +311,29 @@ def thermalize(grid, props, chances, lut, W, H, D, sweeps):
     return grid
 
 
+def session_for(grid, W, H, D):
+    """A persistent-GPU session for this lattice, or None when ineligible (no metal, below
+    the routing floor, or the rng path failed its bit-for-bit gate). Caller owns sync points."""
+    n = W * H * D
+    if n < GAUGE_METAL_MIN_NODES or len(grid) != n or not _metal_rng_ready():
+        return None
+    try:
+        from ringkit.kernels.apple.metal import host as mh
+        return mh.GaugeSession(grid, W, H, D)
+    except Exception:
+        return None
+
+
 def correlation(grid, R, W, H, D):
     """Order parameter: mean alignment of links R apart along the i-axis, normalized 0..1.
     1 = perfectly aligned (ordered), ~0.5 = random, 0 = anti-aligned. Ring-distance based;
     the normalized value is a float MEASUREMENT output (IO), not a ring quantity."""
+    lib = _load()
+    if lib is not None:
+        gb = grid if isinstance(grid, bytearray) else bytearray(grid)
+        tot = ctypes.c_long(0); n = ctypes.c_long(0)
+        lib.correlation_sums(_ptr(gb), R, W, H, D, ctypes.byref(tot), ctypes.byref(n))
+        return tot.value / (n.value * 128) if n.value else 0.0
     sk = W * H
     def cd(a, b):
         d = (a - b) & 0xFF
@@ -325,6 +352,12 @@ def correlation(grid, R, W, H, D):
 def mean_action(grid, W, H, D):
     """Average local ring-action (sum of neighbor ring-distances) — order parameter.
     Low = ordered/aligned (cold), high = disordered (hot). Float MEASUREMENT output (IO)."""
+    lib = _load()
+    if lib is not None:
+        gb = grid if isinstance(grid, bytearray) else bytearray(grid)
+        tot = ctypes.c_long(0); n = ctypes.c_long(0)
+        lib.action_sums(_ptr(gb), W, H, D, ctypes.byref(tot), ctypes.byref(n))
+        return tot.value / n.value if n.value else 0
     sk = W * H
     def cd(a, b):
         d = (a - b) & 0xFF

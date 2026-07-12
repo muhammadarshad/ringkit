@@ -202,3 +202,43 @@ void plaquette_mt(uint8_t *e, const uint8_t *g, long W, long H, long D, int nthr
     for (int t = 0; t < nthreads; t++)
         pthread_join(tid[t], 0);
 }
+
+/* ── observable reductions (silicon): integer sums; the host does the final divide.
+ *    Memory-bound single pass; partial sums per k-slab would thread trivially, but a single
+ *    core already turns the python-loop observables (~500 ms at 128^3) into ~ms. ────────── */
+
+void action_sums(const uint8_t * restrict grid, long W, long H, long D,
+                 long *tot_out, long *n_out) {
+    long sk = W * H;
+    long tot = 0, n = 0;
+    for (long k = 1; k < D - 1; k++)
+        for (long j = 1; j < H - 1; j++) {
+            long base = k * sk + j * W;
+            for (long i = 1; i < W - 1; i++) {
+                long c = base + i;
+                tot += _cdist(grid[c], grid[c + 1])
+                     + _cdist(grid[c], grid[c + W])
+                     + _cdist(grid[c], grid[c + sk]);
+                n += 3;
+            }
+        }
+    *tot_out = tot;
+    *n_out = n;
+}
+
+void correlation_sums(const uint8_t * restrict grid, long R, long W, long H, long D,
+                      long *tot_out, long *n_out) {
+    long sk = W * H;
+    long tot = 0, n = 0;
+    for (long k = 1; k < D - 1; k++)
+        for (long j = 1; j < H - 1; j++) {
+            long base = k * sk + j * W;
+            for (long i = 1; i < W - 1 - R; i++) {
+                long c = base + i;
+                tot += 128 - _cdist(grid[c], grid[c + R]);
+                n += 1;
+            }
+        }
+    *tot_out = tot;
+    *n_out = n;
+}

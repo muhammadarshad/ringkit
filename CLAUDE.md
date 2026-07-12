@@ -77,8 +77,8 @@ ringkit/
                      Python fallback; gemm.py + ring_gemm.c: ring GEMM in 3 gated variants —
                      hardware-`*` bridge 215 GMAC/s, multiplier-free shiftadd 55 [beats BLAS],
                      multiplier-free QSM table 13 — serves rnp matmul), mprc/qcm/ (qcm_kernel.c, cache_manifold.c),
-                     mprc/lattice/ (gauge.c [threaded *_mt: static checkerboard slab bins, lock-free,
-                     bit-identical] + host.py: ctypes host, py reference, float observables),
+                     mprc/lattice/ (gauge.c [threaded *_mt slab bins + C observable reductions] +
+                     host.py: ctypes host, py reference, observables, GPU session_for),
                      apple/metal/ (ring_ops+gauge+gemm shaders, shim.m, host.py — all bit-for-bit
                      verified: elementwise OPT-IN [C wins]; gauge sweep AUTO >=32^3 + derived-RNG
                      thermalize [rk_mix32, py==C==metal] 0.12 ns/node/sweep; GPU GEMM mul 105 /

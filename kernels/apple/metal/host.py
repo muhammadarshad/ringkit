@@ -14,7 +14,7 @@ import platform
 import subprocess
 from ringkit.kernels.backend import _arch_flags, _BUILD, so_path
 
-_ABI = 5
+_ABI = 6
 _DIR = os.path.dirname(__file__)
 _SHIM_C = os.path.join(_DIR, "shim.m")
 _METAL_SRCS = (os.path.join(_DIR, "ring_ops.metal"), os.path.join(_DIR, "gauge.metal"),
@@ -77,6 +77,19 @@ def _load():
         lib.rk_metal_gemm.argtypes = [ctypes.c_int, _U8, _U8, _U8,
                                       ctypes.c_long, ctypes.c_long, ctypes.c_long]
         lib.rk_metal_gemm.restype = ctypes.c_int
+        lib.rk_metal_session_create.argtypes = [_U8, ctypes.c_long]
+        lib.rk_metal_session_create.restype = ctypes.c_long
+        lib.rk_metal_session_thermalize_rng.argtypes = [ctypes.c_long, ctypes.c_uint,
+                                                        ctypes.c_uint, _U8, ctypes.c_long,
+                                                        ctypes.c_long, ctypes.c_long,
+                                                        ctypes.c_long]
+        lib.rk_metal_session_thermalize_rng.restype = ctypes.c_int
+        lib.rk_metal_session_read.argtypes = [ctypes.c_long, _U8, ctypes.c_long]
+        lib.rk_metal_session_read.restype = ctypes.c_int
+        lib.rk_metal_session_write.argtypes = [ctypes.c_long, _U8, ctypes.c_long]
+        lib.rk_metal_session_write.restype = ctypes.c_int
+        lib.rk_metal_session_free.argtypes = [ctypes.c_long]
+        lib.rk_metal_session_free.restype = ctypes.c_int
         lib.rk_metal_device_name.restype = ctypes.c_char_p
         src = b"\n".join(open(p, "rb").read() for p in _METAL_SRCS)
         if lib.rk_metal_init(src) != 0:
@@ -139,6 +152,48 @@ def thermalize_rng(grid, seed, sweep0, lut, W, H, D, sweeps):
     lb = lut if isinstance(lut, bytearray) else bytearray(lut)
     return lib.rk_metal_thermalize_rng(_ptr(grid), seed & 0xFFFFFFFF, sweep0 & 0xFFFFFFFF,
                                        _ptr(lb), W, H, D, sweeps)
+
+
+class GaugeSession:
+    """A lattice living on the GPU across calls (unified memory). thermalize_rng touches
+    only the resident buffer + a 256-byte LUT; read()/write() are the explicit sync points.
+    Falls out of scope -> the buffer is freed."""
+
+    def __init__(self, grid, W, H, D):
+        lib = _load()
+        if lib is None:
+            raise RuntimeError("metal unavailable")
+        self._lib = lib
+        self.W, self.H, self.D = W, H, D
+        self.n = len(grid)
+        g = grid if isinstance(grid, bytearray) else bytearray(grid)
+        self.sid = lib.rk_metal_session_create(_ptr(g), self.n)
+        if self.sid < 0:
+            raise RuntimeError(f"session_create failed ({self.sid})")
+
+    def thermalize_rng(self, seed, sweep0, lut, sweeps):
+        lb = lut if isinstance(lut, bytearray) else bytearray(lut)
+        return self._lib.rk_metal_session_thermalize_rng(
+            self.sid, seed & 0xFFFFFFFF, sweep0 & 0xFFFFFFFF, _ptr(lb),
+            self.W, self.H, self.D, sweeps)
+
+    def read_into(self, out):
+        return self._lib.rk_metal_session_read(self.sid, _ptr(out), self.n)
+
+    def write(self, grid):
+        g = grid if isinstance(grid, bytearray) else bytearray(grid)
+        return self._lib.rk_metal_session_write(self.sid, _ptr(g), self.n)
+
+    def close(self):
+        if getattr(self, "sid", -1) >= 0:
+            self._lib.rk_metal_session_free(self.sid)
+            self.sid = -1
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 GEMM_VARIANTS = {"mul": 0, "qsm": 1}

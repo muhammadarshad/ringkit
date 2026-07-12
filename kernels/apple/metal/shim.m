@@ -8,7 +8,7 @@
 #import <Foundation/Foundation.h>
 #include <string.h>
 
-#define RK_ABI 5
+#define RK_ABI 6
 
 static id<MTLDevice> g_dev = nil;
 static id<MTLCommandQueue> g_queue = nil;
@@ -164,19 +164,13 @@ int rk_metal_plaquette(unsigned char *e, const unsigned char *g, long W, long H,
     }
 }
 
-// The unified-GPU endgame: a batch of sweeps whose randoms are DERIVED on-GPU (rk_mix32),
-// so ONLY grid (n bytes, once each way) + lut (256 bytes) ever cross the bus. sweep0 is the
-// starting sweep index (callers continue the counter across batches).
-int rk_metal_thermalize_rng(unsigned char *grid, unsigned int seed, unsigned int sweep0,
-                            const unsigned char *lut, long W, long H, long D, long sweeps) {
-    long n = W * H * D;
+static int _thermalize_rng_on(id<MTLBuffer> bgrid, unsigned int seed, unsigned int sweep0,
+                              const unsigned char *lut, long W, long H, long D, long sweeps) {
     if (!g_pso[5] || W < 3 || H < 3 || D < 3 || sweeps < 1) return -1;
     @autoreleasepool {
-        id<MTLBuffer> bgrid = [g_dev newBufferWithBytes:grid length:n
-                                                options:MTLResourceStorageModeShared];
         id<MTLBuffer> blut = [g_dev newBufferWithBytes:lut length:256
                                                options:MTLResourceStorageModeShared];
-        if (!bgrid || !blut) return -2;
+        if (!blut) return -2;
         id<MTLCommandBuffer> cb = [g_queue commandBuffer];
         for (long s = 0; s < sweeps; s++) {
             for (unsigned int parity = 0; parity < 2; parity++) {
@@ -193,10 +187,77 @@ int rk_metal_thermalize_rng(unsigned char *grid, unsigned int seed, unsigned int
         }
         [cb commit];
         [cb waitUntilCompleted];
-        if (cb.status != MTLCommandBufferStatusCompleted) return -3;
-        memcpy(grid, bgrid.contents, (size_t)n);
-        return 0;
+        return cb.status == MTLCommandBufferStatusCompleted ? 0 : -3;
     }
+}
+
+// The unified-GPU endgame: a batch of sweeps whose randoms are DERIVED on-GPU (rk_mix32),
+// so ONLY grid (n bytes, once each way) + lut (256 bytes) ever cross the bus. sweep0 is the
+// starting sweep index (callers continue the counter across batches).
+int rk_metal_thermalize_rng(unsigned char *grid, unsigned int seed, unsigned int sweep0,
+                            const unsigned char *lut, long W, long H, long D, long sweeps) {
+    long n = W * H * D;
+    @autoreleasepool {
+        id<MTLBuffer> bgrid = [g_dev newBufferWithBytes:grid length:n
+                                                options:MTLResourceStorageModeShared];
+        if (!bgrid) return -2;
+        int rc = _thermalize_rng_on(bgrid, seed, sweep0, lut, W, H, D, sweeps);
+        if (rc == 0) memcpy(grid, bgrid.contents, (size_t)n);
+        return rc;
+    }
+}
+
+/* ── PERSISTENT GPU SESSIONS: the lattice lives on the device across facade calls; the host
+ *    copy syncs only on observable reads. Unified memory: contents ptr is host-coherent after
+ *    waitUntilCompleted, so read/write are plain memcpy — no blit pass needed. ────────────── */
+
+#define RK_MAX_SESSIONS 32
+static id<MTLBuffer> g_sess[RK_MAX_SESSIONS];
+static long g_sess_len[RK_MAX_SESSIONS];
+
+long rk_metal_session_create(const unsigned char *grid, long n) {
+    if (!g_dev || n < 1) return -1;
+    for (long i = 0; i < RK_MAX_SESSIONS; i++) {
+        if (g_sess[i] == nil) {
+            g_sess[i] = [g_dev newBufferWithBytes:grid length:n
+                                          options:MTLResourceStorageModeShared];
+            if (!g_sess[i]) return -2;
+            g_sess_len[i] = n;
+            return i;
+        }
+    }
+    return -3;                                        /* table full */
+}
+
+static int _sess_ok(long sid, long n) {
+    return sid >= 0 && sid < RK_MAX_SESSIONS && g_sess[sid] != nil
+        && (n < 0 || n == g_sess_len[sid]);
+}
+
+int rk_metal_session_thermalize_rng(long sid, unsigned int seed, unsigned int sweep0,
+                                    const unsigned char *lut,
+                                    long W, long H, long D, long sweeps) {
+    if (!_sess_ok(sid, W * H * D)) return -1;
+    return _thermalize_rng_on(g_sess[sid], seed, sweep0, lut, W, H, D, sweeps);
+}
+
+int rk_metal_session_read(long sid, unsigned char *out, long n) {
+    if (!_sess_ok(sid, n)) return -1;
+    memcpy(out, g_sess[sid].contents, (size_t)n);
+    return 0;
+}
+
+int rk_metal_session_write(long sid, const unsigned char *grid, long n) {
+    if (!_sess_ok(sid, n)) return -1;
+    memcpy(g_sess[sid].contents, grid, (size_t)n);
+    return 0;
+}
+
+int rk_metal_session_free(long sid) {
+    if (sid < 0 || sid >= RK_MAX_SESSIONS) return -1;
+    g_sess[sid] = nil;                                /* ARC releases the buffer */
+    g_sess_len[sid] = 0;
+    return 0;
 }
 
 // A BATCH of full sweeps, GPU-resident (unified memory): the grid crosses the bus once per

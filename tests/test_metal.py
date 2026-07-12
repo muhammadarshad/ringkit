@@ -133,6 +133,21 @@ check("python reference == C (rng path)", gp == gc3)
 check("C == metal (rng path)", gc3 == gm3)
 check("rng gate passes", lat._metal_rng_ready())
 
+print("== persistent GPU session: resident lattice == per-call path == C (bit-for-bit) ==")
+sess = lat.session_for(bytearray(g2), W2, H2, D2)
+check("session eligible at 32^3", sess is not None)
+if sess is not None:
+    sess.thermalize_rng(4242, 0, lut, 5)
+    got = bytearray(n2)
+    check("session read rc == 0", sess.read_into(got) == 0)
+    want32 = bytearray(g2)
+    lat.thermalize_rng(want32, 4242, lut, W2, H2, D2, 5)
+    check("session result == routed thermalize_rng result", got == want32)
+    check("session write/read roundtrip", sess.write(g2) == 0
+          and (sess.read_into(got) == 0 and got == g2))
+    sess.close()
+    check("close() frees; further reads fail cleanly", sess.read_into(got) != 0)
+
 print("== facade determinism: same seed -> same physics across routing paths ==")
 import ringkit as rk
 gA = rk.physics.Gauge(size=(32, 32, 32), beta=40, seed=9)

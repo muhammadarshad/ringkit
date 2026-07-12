@@ -13,8 +13,8 @@ multiplier-free, no floats.
 """
 from ringkit.core import native as rn
 from ringkit.kernels.mprc.lattice.host import (   # D9 silicon host (hardware ops live there)
-    build, available, plaquette, sweep, thermalize, thermalize_rng, correlation,
-    mean_action, _load,
+    build, available, plaquette, sweep, thermalize, thermalize_rng, session_for,
+    correlation, mean_action, _load,
 )
 
 
