@@ -13,9 +13,10 @@ import ctypes
 import os
 import subprocess
 from ringkit.core import native as rn
+from ringkit.kernels.backend import _arch_flags, _BUILD
 
-_DIR = os.path.join(os.path.dirname(__file__), "..", "kernels")
-_SO = os.path.join(_DIR, "gauge.so")
+_DIR = os.path.join(os.path.dirname(__file__), "..", "kernels", "mprc", "lattice")
+_SO = os.path.join(_BUILD, "gauge.so")
 _C = os.path.join(_DIR, "gauge.c")
 _U8 = ctypes.POINTER(ctypes.c_uint8)
 _lib = None
@@ -23,8 +24,9 @@ _tried = False
 
 
 def build():
-    subprocess.run(["cc", "-O3", "-march=native", "-funroll-loops", "-shared", "-fPIC",
-                    "-o", _SO, _C], check=True)
+    os.makedirs(_BUILD, exist_ok=True)
+    subprocess.run(["cc", "-O3", "-funroll-loops", "-shared", "-fPIC",
+                    *_arch_flags(), "-o", _SO, _C], check=True)
 
 
 def _load():

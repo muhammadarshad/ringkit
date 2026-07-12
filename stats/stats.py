@@ -12,7 +12,7 @@ These are the circular / L1 forms, built on ring_native only.
 """
 from ringkit.core import native as rn
 
-TAU = 256
+from ringkit.core.constants import TAU
 
 
 def ring_dist(a, b):

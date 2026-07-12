@@ -1,20 +1,20 @@
 """
-ringkit.array.numpy — our own numpy, ring-native (Z256). NOT the standard numpy.
+ringkit.rnp — our own numpy, ring-native (Z256). NOT the standard numpy.
 
 A numpy-style ndarray namespace over RingTensor. Same feel (array/zeros/arange/eye, @/.T,
 sum/prod/mean/min/max/argmin/argmax, reshape/transpose/concatenate/stack), but every element is
 a ring value 0..255 and every op is ring-native + multiplier-free. Unit tag: 'arc' | 'energy'.
 
-    import ringkit.array.numpy as rnp
+    import ringkit.rnp as rnp
     a = rnp.arange(12).reshape(3, 4);  b = rnp.eye(4);  c = a @ b;  d = rnp.sum(a, axis=0)
 """
 from ringkit.core import native as rn
-from ringkit.array.tensor import (
+from ringkit.rnp.tensor import (
     RingTensor, matmul, transpose as _transpose, concatenate as _concat, stack as _stack,
     SIN as _SIN, COS as _COS,
 )
 
-TAU = 256
+from ringkit.core.constants import TAU
 E_TAU = 2.844444444444444444
 E_PI = 1.422222222222222222
 E_PI2 = 0.711111111111111111

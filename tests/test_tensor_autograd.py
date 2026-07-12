@@ -4,7 +4,7 @@ Run: python3 -m ringkit.tests.test_tensor_autograd"""
 from ringkit.core import native as rn
 from ringkit.ml.tensor_autograd import TVar
 from ringkit.ml.autograd import Var          # scalar reference of record
-from ringkit.array.tensor import RingTensor
+from ringkit.rnp.tensor import RingTensor
 
 fails = []
 def check(name, cond):
@@ -64,7 +64,7 @@ dB_ref = [sum(sgn(ad[m * K + k]) for m in range(M)) for k in range(K) for n in r
 check("matmul dA == manual signed reference", list(at.grad) == dA_ref)
 check("matmul dB == manual signed reference", list(bt.grad) == dB_ref)
 # forward value equals RingTensor matmul
-from ringkit.array.tensor import matmul as _mm
+from ringkit.rnp.tensor import matmul as _mm
 check("matmul forward == RingTensor matmul", list(at.matmul(bt).val.data) == list(_mm(RingTensor(Am), RingTensor(Bm)).data))
 
 print("== errors ==")

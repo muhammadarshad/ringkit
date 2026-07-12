@@ -10,8 +10,7 @@ Two exact notions, both verified:
 """
 from ringkit.core import native as rn
 
-TAU = 256
-Q = 64
+from ringkit.core.constants import TAU, Q
 
 
 # ── rotational derivative (iota) — exact for the trig family ─────────────────

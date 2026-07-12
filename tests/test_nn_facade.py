@@ -4,6 +4,7 @@ Keeps the honesty bar: structured task generalizes held-out; random labels colla
 Run: python3 -m ringkit.tests.test_nn_facade"""
 import random
 import ringkit as rk
+from ringkit.linalg.solve import is_invertible
 
 fails = []
 def check(name, cond):
@@ -132,11 +133,11 @@ KD = 4
 # secret encoder E; train decoder to invert it, then attention reads values in-context
 while True:
     E = [[random.randint(0, 255) for _ in range(KD)] for _ in range(KD)]
-    if rk.nn._is_inv(E): break
+    if is_invertible(E): break
 def enc(k): return [sum(k[i] * E[i][j] for i in range(KD)) & 0xFF for j in range(KD)]
 # training pairs (encoded_key -> true_key) to learn decoder = E^-1
 ktr = [[random.randint(0, 255) for _ in range(KD)] for _ in range(KD)]
-while not rk.nn._is_inv([enc(k) for k in ktr]):
+while not is_invertible([enc(k) for k in ktr]):
     ktr = [[random.randint(0, 255) for _ in range(KD)] for _ in range(KD)]
 tf2 = rk.nn.Transformer(key_dim=KD)
 tf2.fit([enc(k) for k in ktr], ktr)
@@ -159,7 +160,7 @@ acc_ok = recall_acc(tf2)
 # random-trained decoder control
 tf_r = rk.nn.Transformer(key_dim=KD)
 kr = [[random.randint(0, 255) for _ in range(KD)] for _ in range(KD)]
-while not rk.nn._is_inv(kr):
+while not is_invertible(kr):
     kr = [[random.randint(0, 255) for _ in range(KD)] for _ in range(KD)]
 tf_r.fit(kr, [[random.randint(0, 255) for _ in range(KD)] for _ in range(KD)])
 acc_rand = recall_acc(tf_r)

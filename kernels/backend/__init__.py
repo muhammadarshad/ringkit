@@ -11,10 +11,12 @@ Kernels: ring_mul/add/sub (auto-vectorized) and ring_*_u64 (explicit 64-lane unr
 """
 import ctypes
 import os
+import platform
 import subprocess
 
 _DIR = os.path.dirname(__file__)
-_SO = os.path.join(_DIR, "ring_ops.so")
+_BUILD = os.path.join(_DIR, "..", "build")          # all compiled kernels land in kernels/build/
+_SO = os.path.join(_BUILD, "ring_ops.so")
 _C = os.path.join(_DIR, "ring_ops.c")
 _U8 = ctypes.POINTER(ctypes.c_uint8)
 _NAMES = ("ring_mul", "ring_add", "ring_sub", "ring_mul_u64", "ring_add_u64", "ring_sub_u64")
@@ -23,9 +25,20 @@ _tried = False
 
 
 def build():
-    """Compile ring_ops.c -> ring_ops.so (-O3 -march=native, SIMD). Raises on failure."""
-    subprocess.run(["cc", "-O3", "-march=native", "-funroll-loops", "-shared", "-fPIC",
-                    "-o", _SO, _C], check=True)
+    """Compile ring_ops.c -> ring_ops.so (-O3, SIMD) for THIS interpreter's architecture.
+    On macOS the running Python may be x86_64 (Rosetta) while cc targets arm64 by default,
+    so we pass -arch explicitly; -march=native only when host and target arch match. Raises on failure."""
+    os.makedirs(_BUILD, exist_ok=True)
+    subprocess.run(["cc", "-O3", "-funroll-loops", "-shared", "-fPIC",
+                    *_arch_flags(), "-o", _SO, _C], check=True)
+
+
+def _arch_flags():
+    if platform.system() == "Darwin":
+        # -march=native is unusable here: it probes the HOST cpu (e.g. apple-m1) even when
+        # -arch cross-targets the interpreter's arch (e.g. x86_64 Python under Rosetta).
+        return ["-arch", platform.machine()]
+    return ["-march=native"]
 
 
 def _load():

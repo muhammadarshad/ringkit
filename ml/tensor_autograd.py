@@ -12,7 +12,7 @@ Supported: elementwise add/sub/mul (same-shape or scalar), sin/cos, sum() reduct
     loss = a.matmul(b).sin().sum(); loss.backward(); a.grad  # signed d loss / d a
 """
 from ringkit.core import native as rn
-from ringkit.array.tensor import RingTensor, matmul as _matmul
+from ringkit.rnp.tensor import RingTensor, matmul as _matmul
 
 
 def _sz(shape):

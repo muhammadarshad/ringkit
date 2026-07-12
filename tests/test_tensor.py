@@ -1,9 +1,9 @@
-"""Production tests for ringkit.array.tensor. Cross-checks numpy-equivalent ops against real
+"""Production tests for ringkit.rnp.tensor. Cross-checks numpy-equivalent ops against real
 numpy MOD 256 (numpy used ONLY as an external oracle, never by the library). Run: python3 -m ringkit.tests.test_tensor"""
 import itertools
 import numpy as np                       # oracle only (labeled external comparison)
-from ringkit.array import tensor as rt
-from ringkit.array import numpy as rnp
+from ringkit.rnp import tensor as rt
+import ringkit.rnp as rnp
 
 RT = rt.RingTensor
 def npmod(a): return (np.asarray(a) & 0xFF).astype(int)
@@ -104,7 +104,7 @@ check("ValueError matmul mismatch", raises(ValueError, lambda: Am@Am))
 check("ValueError bad transpose axes", raises(ValueError, lambda: X.transpose(0,0)))
 check("ValueError broadcast incompatible", raises(ValueError, lambda: X + RT([1,2,3,4])))
 check("ValueError data/shape mismatch", raises(ValueError, lambda: RT([1,2,3],(2,2))))
-check("no user-facing assert in module", "assert " not in open("ringkit/array/tensor.py").read().replace("# ","").split("Production")[0] or True)  # asserts removed from logic
+check("no user-facing assert in module", "assert " not in open("ringkit/rnp/tensor.py").read().replace("# ","").split("Production")[0] or True)  # asserts removed from logic
 
 print()
 print("RESULT:", "ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")

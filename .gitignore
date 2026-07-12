@@ -4,3 +4,4 @@ __pycache__/
 *.o
 .DS_Store
 .vscode/
+kernels/build/

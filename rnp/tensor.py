@@ -1,5 +1,5 @@
 """
-ringkit.array.tensor — RingTensor: production nD ndarray on the Z256 ring.
+ringkit.rnp.tensor — RingTensor: production nD ndarray on the Z256 ring.
 
 Charter-clean: pure-Python list backing (no numpy import, NFR2); every value is a ring value
 0..255; all index/stride/size arithmetic is multiplier-free (rn.mul / rn.mf_floordiv). A `unit`
@@ -20,7 +20,7 @@ from ringkit.core import native as rn
 from ringkit.stats import stats as rs
 from ringkit.kernels import backend as _k     # silicon fast-path (zero-copy on the C buffer)
 
-TAU = 256
+from ringkit.core.constants import TAU
 
 
 # ── shape / stride helpers (multiplier-free) ─────────────────────────────────

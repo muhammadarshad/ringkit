@@ -19,8 +19,7 @@ All integer, multiplier-free (bit ops + ring_native).
 """
 from ringkit.core import native as rn
 
-TAU = 256
-VACUUMS = frozenset({0, 64, 128, 192})
+from ringkit.core.constants import TAU, VACUUMS
 QUADRANTS = ("UP+", "UP-", "DN+", "DN-")
 
 # ── QCM node state (SILIQ ALGORITHM.md sec 3.2) ──────────────────────────────

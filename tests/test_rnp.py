@@ -1,7 +1,7 @@
-"""Tests for ringkit.array.numpy (our numpy namespace). numpy = external oracle only.
-Run: python3 -m ringkit.tests.test_numpy"""
+"""Tests for ringkit.rnp (our numpy namespace). numpy = external oracle only.
+Run: python3 -m ringkit.tests.test_rnp"""
 import numpy as np
-import ringkit.array.numpy as rnp
+import ringkit.rnp as rnp
 
 def npmod(a): return (np.asarray(a) & 0xFF).astype(int).tolist()
 fails = []

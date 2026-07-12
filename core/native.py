@@ -17,12 +17,8 @@ Sections
 """
 
 # ── 1. Ring constants ────────────────────────────────────────────────────────
-TAU     = 256          # full ring (2*pi)
-HALF    = 128          # half ring (pi)
-Q       = 64           # quadrant (pi/2), = vacuum spacing
-Q2      = 32           # half quadrant (pi/4), KS4 half-period
-SCALE   = 21           # amplitude unit = XYZ scalar axes = 1 + 4 + 16 (4^0+4^1+4^2)
-VACUUMS = frozenset({0, 64, 128, 192})
+# Single-sourced in core/constants.py (frozen there — the ring's identity, not overridable).
+from ringkit.core.constants import TAU, HALF, Q, Q2, SCALE, VACUUMS, RING_E, IOTA
 
 
 # ── 2. Multiplier-free primitives ────────────────────────────────────────────
@@ -174,7 +170,7 @@ def mf_mod(n, d):
 #     64-step quarter turn (one iota) — amplitude growth locked to orthogonal rotation;
 #   * canonical & rooted in the constants: 3 = master N, and SCALE=21 = 3*7.
 # (The QH4 doc's "E_hat numerator 173" is exactly -3^45 mod 256 — it was a power of 3 all along.)
-RING_E = 3                       # ring-native e: the exponential base / unit generator
+# RING_E = 3 (imported from core.constants): the exponential base / unit generator
 
 _E_ORBIT = []                    # 3^k mod 256, k = 0..63  (the natural exponential's image)
 _e_acc = 1
@@ -207,7 +203,7 @@ def ring_log(u):
 # number — it is the 2x2 rotor operator J = [[0,-1],[1,0]], with J^2 = -I and J^4 = I (the 4
 # iotas). Growth (base RING_E=3, multiplicative) and rotation (J, structural) are therefore
 # SEPARATE operators on the ring; standard math fuses them only because C has a scalar i.
-IOTA = ((0, 255), (1, 0))        # J = [[0,-1],[1,0]] mod 256 : i^2 = -I, i^4 = I
+# IOTA (imported from core.constants): J = [[0,-1],[1,0]] mod 256 : i^2 = -I, i^4 = I
 
 
 def ring_cis(phi):
