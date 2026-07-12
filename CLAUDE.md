@@ -46,7 +46,8 @@ so the Rosetta x86_64 dev Python and a native arm64 one coexist. Native run (4x 
   our namespaces are never named after the libraries they replace (`rnp` not numpy, `rmath` not math).
 - **Math and physics first (D11).** Ask the mathematical/physical form BEFORE building. The physics
   here is QUANTUM, realized through MPRC (spins, vacuums, quantum walk, gauge, criticality) — never
-  a re-implementation of standard-model/continuum methods; those are labeled handles only.
+  a re-implementation of standard-model/continuum methods; those are labeled handles only. The forms
+  are ONE interlocking physics, not a menu: the problem at hand selects which form to state first.
 
 ## The honesty bar for ANY learning/ML claim
 
