@@ -23,6 +23,8 @@ so the Rosetta x86_64 dev Python and a native arm64 one coexist. Native run (4x 
 - **D1 Verify by execution.** Never conclude without running it. Every non-trivial claim is
   backed by a test. Prefer exhaustive checks over the 256 ring where feasible.
 - **Multiplier-free semantic layers.** No `*`, `//`, `**`, `/` and **no standard-math imports**
+  — architectural, not aesthetic: multipliers ARE the silicon bottleneck; QSM + the ring
+  dot-product (tables/adds/shifts) are the bypass that makes multiplier-free silicon buildable.
   (numpy/math/scipy) anywhere under `core/ stats/ linalg/ rnp/ rmath.py rcollections/ physics/ ml/ nn/ data.py`.
   (`ringkit.rnp` / `ringkit.rmath` are our REPLACEMENTS for numpy/math — original names per D10.)
   Use `rn.mul` (shift-add), `rn.ipow`, `rn.mf_floordiv`, `rn.ring_pow`, etc. AST-audit new files:
