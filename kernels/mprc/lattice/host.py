@@ -32,8 +32,24 @@ _metal_ok = None                          # D9 gate: metal serves only after a b
 
 def build():
     os.makedirs(_BUILD, exist_ok=True)
+    tmp = _SO + ".tmp"
     subprocess.run(["cc", "-O3", "-funroll-loops", "-shared", "-fPIC",
-                    *_arch_flags(), "-o", _SO, _C], check=True)
+                    *_arch_flags(), "-o", tmp, _C], check=True)
+    os.replace(tmp, _SO)                      # fresh inode -> a re-CDLL loads the new image
+
+
+def _bind(lib):
+    for name in ("plaquette", "plaquette_blocked"):
+        fn = getattr(lib, name)
+        fn.argtypes = [_U8, _U8, ctypes.c_long, ctypes.c_long, ctypes.c_long]
+        fn.restype = None
+    lib.metropolis_sweep.argtypes = [_U8, _U8, _U8, _U8,
+                                     ctypes.c_long, ctypes.c_long, ctypes.c_long, ctypes.c_int]
+    lib.metropolis_sweep.restype = None
+    lib.metropolis_sweep_rng.argtypes = [_U8, ctypes.c_uint, ctypes.c_uint, _U8,
+                                         ctypes.c_long, ctypes.c_long, ctypes.c_long, ctypes.c_int]
+    lib.metropolis_sweep_rng.restype = None
+    return lib
 
 
 def _load():
@@ -41,21 +57,12 @@ def _load():
     if _lib is not None or _tried:
         return _lib
     _tried = True
-    if not os.path.exists(_SO):
-        try:
-            build()
-        except Exception:
-            return None
     try:
-        lib = ctypes.CDLL(_SO)
-        for name in ("plaquette", "plaquette_blocked"):
-            fn = getattr(lib, name)
-            fn.argtypes = [_U8, _U8, ctypes.c_long, ctypes.c_long, ctypes.c_long]
-            fn.restype = None
-        lib.metropolis_sweep.argtypes = [_U8, _U8, _U8, _U8,
-                                         ctypes.c_long, ctypes.c_long, ctypes.c_long, ctypes.c_int]
-        lib.metropolis_sweep.restype = None
-        _lib = lib
+        # Rebuild BEFORE the first CDLL when the artifact predates its source: dyld caches
+        # images by path, so replacing the file after loading cannot take effect in-process.
+        if not os.path.exists(_SO) or os.path.getmtime(_SO) < os.path.getmtime(_C):
+            build()
+        _lib = _bind(ctypes.CDLL(_SO))
     except Exception:
         _lib = None
     return _lib
@@ -161,6 +168,96 @@ def sweep(grid, prop, chance, lut, W, H, D, force_python=False):
     for parity in (0, 1):
         lib.metropolis_sweep(_ptr(grid), _ptr(bytearray(prop)), _ptr(bytearray(chance)),
                              _ptr(bytearray(lut)), W, H, D, parity)
+    return grid
+
+
+def _rand32(seed, sweep, idx):
+    """Reference of record for the counter RNG (rk_mix32) — MUST match gauge.c and gauge.metal
+    bit-for-bit (gated). Randoms are derived from (seed, sweep, node), never stored."""
+    x = (idx + (sweep + 1) * 0x9E3779B9) & 0xFFFFFFFF
+    x ^= (seed * 0x85EBCA6B) & 0xFFFFFFFF
+    x ^= x >> 16
+    x = (x * 0x7FEB352D) & 0xFFFFFFFF
+    x ^= x >> 15
+    x = (x * 0x846CA68B) & 0xFFFFFFFF
+    x ^= x >> 16
+    return x
+
+
+def _py_sweep_rng(grid, seed, sweep, lut, W, H, D, parity):
+    sk = W * H
+    def cd(a, b):
+        d = (a - b) & 0xFF
+        return d if d < 256 - d else 256 - d
+    for k in range(1, D - 1):
+        for j in range(1, H - 1):
+            base = k * sk + j * W
+            for i in range(1, W - 1):
+                if ((i + j + k) & 1) != parity:
+                    continue
+                c = base + i
+                x = _rand32(seed, sweep, c)
+                pr = x & 0xFF
+                ch = (x >> 8) & 0xFF
+                old = grid[c]; nv = (old + pr) & 0xFF
+                nbs = (grid[c+1], grid[c-1], grid[c+W], grid[c-W], grid[c+sk], grid[c-sk])
+                So = sum(cd(old, v) for v in nbs)
+                Sn = sum(cd(nv, v) for v in nbs)
+                dS = Sn - So
+                if dS <= 0 or ch < lut[min(dS, 255)]:
+                    grid[c] = nv
+
+
+_metal_rng_ok = None
+
+
+def _metal_rng_ready():
+    """Eligibility gate for the on-GPU RNG path: metal thermalize_rng must equal the Python
+    reference on a fixed 8^3 lattice / 2 sweeps, once per process."""
+    global _metal_rng_ok
+    if _metal_rng_ok is not None:
+        return _metal_rng_ok
+    try:
+        from ringkit.kernels.apple.metal import host as mh
+        if not mh.available():
+            _metal_rng_ok = False
+            return False
+        W = H = D = 8
+        n = W * H * D
+        g = bytearray((i & 0xFF) for i in range(n))
+        lut = bytearray(255 - d if d < 255 else 0 for d in range(256))
+        want = bytearray(g)
+        for s in (0, 1):
+            _py_sweep_rng(want, 12345, s, lut, W, H, D, 0)
+            _py_sweep_rng(want, 12345, s, lut, W, H, D, 1)
+        got = bytearray(g)
+        _metal_rng_ok = (mh.thermalize_rng(got, 12345, 0, lut, W, H, D, 2) == 0
+                         and got == want)
+    except Exception:
+        _metal_rng_ok = False
+    return _metal_rng_ok
+
+
+def thermalize_rng(grid, seed, lut, W, H, D, sweeps, force_python=False):
+    """Run `sweeps` full sweeps with DERIVED randoms (rk_mix32 counter RNG): nothing random
+    is generated CPU-side or transferred — the unified-GPU path moves only grid + lut.
+    Routes metal (floor + gate) -> C -> Python reference; all three are the same spec."""
+    seed &= 0xFFFFFFFF
+    n = W * H * D
+    if (not force_python and n >= GAUGE_METAL_MIN_NODES and _metal_rng_ready()):
+        from ringkit.kernels.apple.metal import host as mh
+        if mh.thermalize_rng(grid, seed, 0, lut, W, H, D, sweeps) == 0:
+            return grid
+    lib = None if force_python else _load()
+    if lib is None:
+        for s in range(sweeps):
+            _py_sweep_rng(grid, seed, s, lut, W, H, D, 0)
+            _py_sweep_rng(grid, seed, s, lut, W, H, D, 1)
+        return grid
+    lb = lut if isinstance(lut, bytearray) else bytearray(lut)
+    for s in range(sweeps):
+        for parity in (0, 1):
+            lib.metropolis_sweep_rng(_ptr(grid), seed, s, _ptr(lb), W, H, D, parity)
     return grid
 
 

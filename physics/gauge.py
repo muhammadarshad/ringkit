@@ -13,7 +13,8 @@ multiplier-free, no floats.
 """
 from ringkit.core import native as rn
 from ringkit.kernels.mprc.lattice.host import (   # D9 silicon host (hardware ops live there)
-    build, available, plaquette, sweep, thermalize, correlation, mean_action, _load,
+    build, available, plaquette, sweep, thermalize, thermalize_rng, correlation,
+    mean_action, _load,
 )
 
 
@@ -40,8 +41,6 @@ def criticality_scan(betas, W, H, D, therm=30, seed=0):
         rng = _random.Random(seed)
         g = bytearray(rng.randbytes(n))
         L = boltzmann_lut(b)
-        props = bytearray(rng.randbytes(rn.mul(n, therm)))
-        chances = bytearray(rng.randbytes(rn.mul(n, therm)))
-        thermalize(g, props, chances, L, W, H, D, therm)
+        thermalize_rng(g, rng.getrandbits(32), L, W, H, D, therm)
         out.append((b, mean_action(g, W, H, D), correlation(g, 1, W, H, D)))
     return out

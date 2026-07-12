@@ -14,7 +14,7 @@ import platform
 import subprocess
 from ringkit.kernels.backend import _arch_flags, _BUILD, so_path
 
-_ABI = 3
+_ABI = 4
 _DIR = os.path.dirname(__file__)
 _SHIM_C = os.path.join(_DIR, "shim.m")
 _METAL_SRCS = (os.path.join(_DIR, "ring_ops.metal"), os.path.join(_DIR, "gauge.metal"))
@@ -36,21 +36,16 @@ def build():
     os.replace(tmp, _SO)
 
 
-def _open_shim(rebuilt=False):
-    """CDLL the shim; rebuild once if missing or its ABI is stale."""
-    if not os.path.exists(_SO):
+def _open_shim():
+    """CDLL the shim, rebuilding FIRST if the artifact is missing or predates shim.m —
+    dyld caches images by path, so a rebuild after loading cannot take effect in-process."""
+    if not os.path.exists(_SO) or os.path.getmtime(_SO) < os.path.getmtime(_SHIM_C):
         build()
     lib = ctypes.CDLL(_SO)
-    try:
-        lib.rk_metal_abi_version.restype = ctypes.c_int
-        if lib.rk_metal_abi_version() == _ABI:
-            return lib
-    except AttributeError:
-        pass
-    if rebuilt:                                   # rebuilt and still stale: give up
-        raise RuntimeError("metal shim ABI mismatch after rebuild")
-    build()
-    return _open_shim(rebuilt=True)
+    lib.rk_metal_abi_version.restype = ctypes.c_int
+    if lib.rk_metal_abi_version() != _ABI:
+        raise RuntimeError("metal shim ABI stale in this process — restart to pick up rebuild")
+    return lib
 
 
 def _load():
@@ -74,6 +69,10 @@ def _load():
         lib.rk_metal_thermalize.argtypes = [_U8, _U8, _U8, _U8, ctypes.c_long,
                                             ctypes.c_long, ctypes.c_long, ctypes.c_long]
         lib.rk_metal_thermalize.restype = ctypes.c_int
+        lib.rk_metal_thermalize_rng.argtypes = [_U8, ctypes.c_uint, ctypes.c_uint, _U8,
+                                                ctypes.c_long, ctypes.c_long, ctypes.c_long,
+                                                ctypes.c_long]
+        lib.rk_metal_thermalize_rng.restype = ctypes.c_int
         lib.rk_metal_device_name.restype = ctypes.c_char_p
         src = b"\n".join(open(p, "rb").read() for p in _METAL_SRCS)
         if lib.rk_metal_init(src) != 0:
@@ -125,6 +124,17 @@ def thermalize(grid, props, chances, lut, W, H, D, sweeps):
     cb = chances if isinstance(chances, bytearray) else bytearray(chances)
     lb = lut if isinstance(lut, bytearray) else bytearray(lut)
     return lib.rk_metal_thermalize(_ptr(grid), _ptr(pb), _ptr(cb), _ptr(lb), W, H, D, sweeps)
+
+
+def thermalize_rng(grid, seed, sweep0, lut, W, H, D, sweeps):
+    """Batch of sweeps with on-GPU derived randoms (rk_mix32 spec): only grid + lut cross
+    the bus. sweep0 = starting sweep index (counter continues across batches). Returns 0."""
+    lib = _load()
+    if lib is None:
+        return -1
+    lb = lut if isinstance(lut, bytearray) else bytearray(lut)
+    return lib.rk_metal_thermalize_rng(_ptr(grid), seed & 0xFFFFFFFF, sweep0 & 0xFFFFFFFF,
+                                       _ptr(lb), W, H, D, sweeps)
 
 
 def gauge_sweep(grid, prop, chance, lut, W, H, D):

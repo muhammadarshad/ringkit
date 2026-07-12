@@ -8,14 +8,15 @@
 #import <Foundation/Foundation.h>
 #include <string.h>
 
-#define RK_ABI 3
+#define RK_ABI 4
 
 static id<MTLDevice> g_dev = nil;
 static id<MTLCommandQueue> g_queue = nil;
-// 0 mul, 1 add, 2 sub, 3 plaquette, 4 metropolis_sweep
-static id<MTLComputePipelineState> g_pso[5] = {nil, nil, nil, nil, nil};
+// 0 mul, 1 add, 2 sub, 3 plaquette, 4 metropolis_sweep, 5 metropolis_sweep_rng
+static id<MTLComputePipelineState> g_pso[6] = {nil, nil, nil, nil, nil, nil};
 
 typedef struct { unsigned int W, H, D, parity; } RKGaugeParams;
+typedef struct { unsigned int W, H, D, parity, seed, sweep; } RKRngParams;
 
 int rk_metal_abi_version(void) { return RK_ABI; }
 
@@ -33,9 +34,9 @@ int rk_metal_init(const char *src_utf8) {
         if (!lib) return -2;
         g_queue = [g_dev newCommandQueue];
         if (!g_queue) return -3;
-        const char *names[5] = {"ring_mul", "ring_add", "ring_sub",
-                                "plaquette", "metropolis_sweep"};
-        for (int k = 0; k < 5; k++) {
+        const char *names[6] = {"ring_mul", "ring_add", "ring_sub",
+                                "plaquette", "metropolis_sweep", "metropolis_sweep_rng"};
+        for (int k = 0; k < 6; k++) {
             id<MTLFunction> fn = [lib newFunctionWithName:
                                   [NSString stringWithUTF8String:names[k]]];
             if (!fn) return -4;
@@ -110,6 +111,41 @@ int rk_metal_plaquette(unsigned char *e, const unsigned char *g, long W, long H,
         [cb waitUntilCompleted];
         if (cb.status != MTLCommandBufferStatusCompleted) return -3;
         memcpy(e, be.contents, (size_t)n);
+        return 0;
+    }
+}
+
+// The unified-GPU endgame: a batch of sweeps whose randoms are DERIVED on-GPU (rk_mix32),
+// so ONLY grid (n bytes, once each way) + lut (256 bytes) ever cross the bus. sweep0 is the
+// starting sweep index (callers continue the counter across batches).
+int rk_metal_thermalize_rng(unsigned char *grid, unsigned int seed, unsigned int sweep0,
+                            const unsigned char *lut, long W, long H, long D, long sweeps) {
+    long n = W * H * D;
+    if (!g_pso[5] || W < 3 || H < 3 || D < 3 || sweeps < 1) return -1;
+    @autoreleasepool {
+        id<MTLBuffer> bgrid = [g_dev newBufferWithBytes:grid length:n
+                                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> blut = [g_dev newBufferWithBytes:lut length:256
+                                               options:MTLResourceStorageModeShared];
+        if (!bgrid || !blut) return -2;
+        id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+        for (long s = 0; s < sweeps; s++) {
+            for (unsigned int parity = 0; parity < 2; parity++) {
+                RKRngParams p = {(unsigned int)W, (unsigned int)H, (unsigned int)D,
+                                 parity, seed, (unsigned int)(sweep0 + s)};
+                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+                [enc setComputePipelineState:g_pso[5]];
+                [enc setBuffer:bgrid offset:0 atIndex:0];
+                [enc setBuffer:blut offset:0 atIndex:1];
+                [enc setBytes:&p length:sizeof(p) atIndex:2];
+                _dispatch3d(enc, g_pso[5], W, H, D);
+                [enc endEncoding];
+            }
+        }
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.status != MTLCommandBufferStatusCompleted) return -3;
+        memcpy(grid, bgrid.contents, (size_t)n);
         return 0;
     }
 }

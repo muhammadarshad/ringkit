@@ -114,6 +114,36 @@ for s in range(S):
                               lat._ptr(bytearray(lut)), W2, H2, D2, par)
 check("fused batch (3 sweeps, 1 bus round-trip) == sequential C", fused == seq)
 
+print("== derived counter RNG (rk_mix32): python reference == C == metal ==")
+Wr = Hr = Dr = 12
+nr = Wr * Hr * Dr
+g0 = bytearray(random.randbytes(nr))
+gp = bytearray(g0)
+for s in range(3):
+    lat._py_sweep_rng(gp, 777, s, lut, Wr, Hr, Dr, 0)
+    lat._py_sweep_rng(gp, 777, s, lut, Wr, Hr, Dr, 1)
+gc3 = bytearray(g0)
+for s in range(3):
+    for par in (0, 1):
+        lib2.metropolis_sweep_rng(lat._ptr(gc3), 777, s, lat._ptr(bytearray(lut)),
+                                  Wr, Hr, Dr, par)
+gm3 = bytearray(g0)
+check("metal thermalize_rng rc == 0", host.thermalize_rng(gm3, 777, 0, lut, Wr, Hr, Dr, 3) == 0)
+check("python reference == C (rng path)", gp == gc3)
+check("C == metal (rng path)", gc3 == gm3)
+check("rng gate passes", lat._metal_rng_ready())
+
+print("== facade determinism: same seed -> same physics across routing paths ==")
+import ringkit as rk
+gA = rk.physics.Gauge(size=(32, 32, 32), beta=40, seed=9)
+saved = lat.GAUGE_METAL_MIN_NODES
+lat.GAUGE_METAL_MIN_NODES = 1 << 62               # force the C path
+gA.thermalize(sweeps=4)
+lat.GAUGE_METAL_MIN_NODES = saved
+gB = rk.physics.Gauge(size=(32, 32, 32), beta=40, seed=9)
+gB.thermalize(sweeps=4)                            # auto-routes to metal
+check("C-routed and GPU-routed runs produce identical grids", gA.grid == gB.grid)
+
 print()
 print("RESULT:", "ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
 raise SystemExit(0 if not fails else 1)

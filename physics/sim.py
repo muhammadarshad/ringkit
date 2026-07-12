@@ -37,17 +37,12 @@ class Gauge:
 
     def thermalize(self, sweeps=40):
         """Run `sweeps` Metropolis sweeps at the current beta. Mutates the field; returns self.
-        Sweeps run in batches so big lattices stay GPU-resident across the whole batch
-        (unified memory): the grid crosses the bus once per batch, not once per sweep."""
+        Randoms are DERIVED on the compute device (counter RNG, rk_mix32 spec): on the unified-
+        memory GPU only the grid + 256-byte LUT cross the bus for the whole run. The per-call
+        seed comes from this Gauge's seeded stream, so runs stay reproducible."""
         lut = _gauge.boltzmann_lut(self.beta)
-        n = len(self.grid)
-        remaining = int(sweeps)
-        while remaining > 0:
-            batch = 8 if remaining > 8 else remaining
-            props = bytearray(self._rng.randbytes(_rn.mul(n, batch)))
-            chances = bytearray(self._rng.randbytes(_rn.mul(n, batch)))
-            _gauge.thermalize(self.grid, props, chances, lut, self.W, self.H, self.D, batch)
-            remaining -= batch
+        seed = self._rng.getrandbits(32)
+        _gauge.thermalize_rng(self.grid, seed, lut, self.W, self.H, self.D, int(sweeps))
         return self
 
     def plaquette(self):

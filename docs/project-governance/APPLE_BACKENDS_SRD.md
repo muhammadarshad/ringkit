@@ -54,10 +54,17 @@ Measured on M1 Pro: sweep kernel 1.9-2.9 ns/node on GPU vs ~15.8 C; end-to-end
 Gauge(128^3).thermalize(16) = 2.5x (17.65 -> 7.13 ns/node/sweep) because the CPU-side
 Mersenne RNG now dominates (2 x 33 MB of randoms per 8-sweep batch). Next levers, in order:
 
-1. **GPU-side counter RNG (philox-style)** to kill the RNG bottleneck. This changes the
-   semantic contract (prop/chance become derived, not supplied), so it requires its own
-   Python reference implementation and bit-for-bit gate before it may serve — D9 applies to
-   RNG exactly as to arithmetic. Expected: end-to-end approaches the 6-8x kernel ceiling.
+1. **GPU-side counter RNG — DONE 2026-07-12.** rk_mix32 (lowbias32 mixer over
+   (seed, sweep, node)) implemented THREE times — Python reference (bit-truth, lattice
+   host), C (gauge.c metropolis_sweep_rng), Metal (gauge.metal) — and proven identical
+   before serving (self-test gate + test_metal 3-way check). Only grid + 256-byte LUT
+   cross the bus for a whole thermalize. Measured end-to-end (warmed, M1 Pro, 16 sweeps):
+       64^3: 11.31 -> 1.14 ns/node/sweep ( 9.9x)     128^3: 11.71 -> 0.51 (23.0x)
+      160^3: 11.76 -> 0.21 (56.0x)                   192^3: 11.90 -> 0.21 (57.4x)
+   ~4.8 G node-updates/s at 160^3+ — CUDA-class for an 8-bit 6-neighbor Metropolis.
+   Facade determinism verified: same seed -> identical grids on C and GPU routes.
+   En route fix: dyld caches images BY PATH, so all three loaders now rebuild stale
+   artifacts BEFORE the first CDLL (mtime vs source) — in-process reload never works.
 2. **True zero-copy buffers**: page-aligned grid allocation (mmap) wrapped with
    newBufferWithBytesNoCopy — UMA means the copy in rk_metal_thermalize is pure waste.
 3. **Persistent GPU session**: keep grid + LUT as living MTLBuffers across facade calls

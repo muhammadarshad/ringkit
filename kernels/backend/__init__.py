@@ -66,11 +66,11 @@ def _load():
     if _lib is not None or _tried:
         return _lib
     _tried = True
-    if not os.path.exists(_SO):
-        try:
-            build()
-        except Exception:
-            return None
+    try:
+        if not os.path.exists(_SO) or os.path.getmtime(_SO) < os.path.getmtime(_C):
+            build()                       # rebuild BEFORE first CDLL (dyld caches by path)
+    except Exception:
+        return None
     try:
         lib = ctypes.CDLL(_SO)
         for name in _NAMES:
