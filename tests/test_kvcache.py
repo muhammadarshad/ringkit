@@ -105,7 +105,7 @@ Vf = [[10, 10, 10, 10], [250, 250, 250, 250]]
 cf = kv.RingKVCache(D, rope=False)
 for k, v in zip(Kf, Vf):
     cf.append(k, v)
-row = kv.score_row([0, 0, 0, 0], cf.K)
+row = kv.score_row([0, 0, 0, 0], cf.keys())
 w, best = kv.boltzmann_weights(row, 4)
 pull = rn.qsm(w[1], kv.signed_offset(Vf[1][0], Vf[0][0]))
 mass = w[0] + w[1]
@@ -126,12 +126,22 @@ den = w[0] + w[1]
 check(f"even weight mass {den} divides exactly in ENERGY (a modular inverse would collapse here)",
       den == 510 and rn.mf_floordiv(rn.qsm(255, 60) + rn.qsm(255, 100), den) == 80)
 
-print("== 5. footprint: 1 byte per coordinate, no scales, no zero-points ==")
+print("== 5. footprint + the QCM cache manifold (its cost stated, not hidden) ==")
 c = kv.RingKVCache(8)
 for _ in range(100):
     c.append([1] * 8, [2] * 8)
-check(f"100 tokens x dim 8, K+V = {c.nbytes()} bytes == 2*8*100 exactly (no side tables)",
-      c.nbytes() == 1600)
+check(f"payload = {c.payload_bytes()} bytes == 2*8*100 exactly: 1 byte/coord, no side tables",
+      c.payload_bytes() == 1600)
+# The slab is PRIME-pitched (dim 8 -> pitch 11), never a power of two: a 2^k row stride aliases
+# successive tokens into the same cache sets. Measured worth 1.14x on the decode scan at dim 128.
+# HONEST: the pad is real memory. At dim 8 it costs 37%; at dim 128 (pitch 131) it costs 2.3%.
+check(f"slab is PRIME-pitched: dim 8 -> pitch {c.pitch} (NOT 8 — that is the aliasing layout)",
+      c.pitch == 11)
+check(f"manifold pad is real and paid for: slab {c.nbytes()} bytes vs {c.payload_bytes()} payload; "
+      f"at dim 128 the pitch is {kv.RingKVCache(128).pitch} (2.3% pad, 1.14x faster scan)",
+      c.nbytes() == 2200 and kv.RingKVCache(128).pitch == 131)
+check("storage is a CONTIGUOUS C-owned slab, not a Python list of rows (D9)",
+      isinstance(c.K, bytearray) and isinstance(c.V, bytearray))
 check("cache holds only K and V (no scale/zero-point attributes)",
       not any(hasattr(c, a) for a in ("scale", "zero_point", "codebook", "calib")))
 

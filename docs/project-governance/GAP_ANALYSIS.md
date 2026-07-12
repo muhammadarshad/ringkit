@@ -63,7 +63,7 @@ the two attached reference projects.
 | **Gradient-descent training that generalizes** | ✅ (SGD/Adam) | ⚠️ **descent is "flaky on ring"**; real learning is exact **solve** / invert-then-solve | **CRITICAL** — solve covers linear+invertible only, not representation learning |
 | `nn.Linear` (learned) | ✅ | ✅ but fit by exact solve, not trained | ok for linear |
 | **`nn.Embedding` (learned lookup table)** | ✅ | ❌ | needed for text/image tokens |
-| **Softmax attention (learned QKV, soft weights)** | ✅ | ⚠️ hard argmax content-routing only, exact-match tested | soft weighting is now constructible (see below); **learned** QKV still gated on Axis-2 |
+| **Softmax attention (soft weights)** | ✅ | ✅ **BUILT + verified** — `ml/kvcache.py` Boltzmann-weighted soft attention (temperature `beta`, geometric-decay weights, circular value blend); hard argmax is only the `beta→∞` cold limit. `tests/test_kvcache.py` ALL PASS (cached==uncached bit-for-bit; uniform→soft→argmax sweep; circular-blend control). | **learned** QKV + backward still gated on Axis-2 |
 | **LayerNorm / RMSNorm (ring-native)** | ✅ | ❌ | normalization is float in both refs |
 | **GELU / softmax / activations (ring-native)** | ✅ | ⚠️ SIN activation only; **forward softmax has a form** (Boltzmann LUT + energy-domain normalize) but is unbuilt, and its derivative does not exist | forward: build it; **backward: open** |
 | Conv2d / pooling | ✅ | ❌ | needed for image encoders |

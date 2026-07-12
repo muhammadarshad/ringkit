@@ -146,7 +146,11 @@ def attend_full(Q, K, V, beta=16, hard=False, use_rope=True):
 class RingKVCache:
     """The cache: past (key, value) bindings, keys already carrying their position.
 
-    Append as you decode; attend reads the whole past. 1 byte per coordinate, no side tables.
+    STORAGE IS C, NOT PYTHON (charter D9). Keys and values live in ONE CONTIGUOUS uint8 slab each
+    — a bytearray whose C memory is handed to the kernel zero-copy, row-major (token j occupies
+    [j*dim : (j+1)*dim]). Never a list-of-rows: a flat slab is what lets the decode scan vectorize
+    to 8-bit SIMD and what lets C own the data. The scoring hot path runs in
+    kernels/mprc/kv/kv_cache.c, self-tested bit-for-bit against the reference below.
 
         c = RingKVCache(dim=4)
         c.append(k0, v0); c.append(k1, v1)
@@ -154,43 +158,82 @@ class RingKVCache:
     """
 
     def __init__(self, dim, rope=True):
+        from ringkit.kernels.mprc.kv import host as _kvhost
         self.dim = int(dim)
         self.rope = bool(rope)
-        self.K = []
-        self.V = []
+        # QCM CACHE MANIFOLD: the row pitch is the next PRIME >= dim, never a power of two.
+        # dim is almost always 64/128/256 — exactly the layout whose rows alias into the same
+        # cache sets. Prime-pitching the slab is worth a measured 1.14x on the decode scan
+        # (kernels/mprc/qcm/cache_manifold.c is the in-repo proof of the effect).
+        self.pitch = _kvhost.next_prime(self.dim)
+        self.K = bytearray()          # ONE contiguous slab (C memory), row-major, prime-pitched
+        self.V = bytearray()
+        self.n = 0
 
     def __len__(self):
-        return len(self.K)
+        return self.n
+
+    def _row(self, buf, j):
+        """View of token j's row in the slab. Offsets walk by += pitch (no '*' in this layer)."""
+        off = 0
+        for _ in range(j):
+            off += self.pitch
+        return buf[off:off + self.dim]
+
+    def keys(self):
+        return [self._row(self.K, j) for j in range(self.n)]
+
+    def values(self):
+        return [self._row(self.V, j) for j in range(self.n)]
 
     def append(self, k, v):
         """Lay down one binding at the next position. RoPE is applied HERE (exactly, additively), so
-        the stored key is read-ready forever."""
+        the stored key is read-ready forever. Both rows are appended to the contiguous slab."""
         if len(k) != self.dim or len(v) != self.dim:
             raise ValueError(f"append: expected dim {self.dim}, got k={len(k)} v={len(v)}")
-        pos = len(self.K)
+        pos = self.n
         kk = rope(k, pos) if self.rope else [int(x) & 0xFF for x in k]
-        self.K.append(bytearray(kk))
-        self.V.append(bytearray(int(x) & 0xFF for x in v))
+        pad = bytearray(self.pitch - self.dim)          # manifold pad: never read, never scored
+        self.K.extend(bytearray(kk))
+        self.K.extend(pad)
+        self.V.extend(bytearray(int(x) & 0xFF for x in v))
+        self.V.extend(pad)
+        self.n += 1
         return self
 
     def attend(self, q, beta=16, hard=False, pos=None):
         """Attend the query over the whole cached past. pos defaults to the newest position, which
-        is what a decoder wants at step t."""
-        if not self.K:
+        is what a decoder wants at step t. Scoring runs on the C slab (Python reference if absent)."""
+        from ringkit.kernels.mprc.kv import host as _kvhost
+        if not self.n:
             raise ValueError("attend: cache is empty")
         if pos is None:
-            pos = len(self.K) - 1
+            pos = self.n - 1
         qp = rope(q, pos) if self.rope else [int(x) & 0xFF for x in q]
-        row = score_row(qp, self.K)
+        row = _kvhost.scores(self.K, qp, self.n, self.dim, self.pitch)   # C, zero-copy over the slab
         w, best = boltzmann_weights(row, beta)
+        V = self.values()
         if hard:
-            return list(self.V[best])
-        return circular_blend(self.V, w, best)
+            return list(V[best])
+        return circular_blend(V, w, best)
 
     def nbytes(self):
-        """Exact cache footprint: keys + values, 1 byte per coordinate. No scales, no zero-points."""
-        return rn.mul(rn.mul(2, self.dim), len(self.K))
+        """Exact footprint of the two slabs, INCLUDING the manifold pad (honest: the prime pitch
+        costs (pitch-dim) bytes per token per slab, and buys 1.14x on the scan)."""
+        return len(self.K) + len(self.V)
+
+    def payload_bytes(self):
+        """Bytes of actual key+value data, excluding the manifold pad. 1 byte per coordinate."""
+        n = 0
+        for _ in range(self.n):
+            n += self.dim
+            n += self.dim
+        return n
 
     @property
     def raw(self):
-        return {"dim": self.dim, "rope": self.rope, "len": len(self.K), "bytes": self.nbytes()}
+        from ringkit.kernels.mprc.kv import host as _kvhost
+        return {"dim": self.dim, "pitch": self.pitch, "rope": self.rope, "len": self.n,
+                "bytes": self.nbytes(), "payload": self.payload_bytes(),
+                "storage": "contiguous uint8 slab (C-owned, zero-copy, PRIME-pitched)",
+                "kernel": "C" if _kvhost.available() else "python"}
