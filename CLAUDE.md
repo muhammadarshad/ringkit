@@ -18,7 +18,7 @@ Builds target the **running interpreter's** architecture and are arch-keyed (`<s
 so the Rosetta x86_64 dev Python and a native arm64 one coexist. Native run (4x faster C kernels):
 `arch -arm64 /usr/bin/python3 -m ringkit.tests.run_all` — also ALL GREEN.
 
-## Non-negotiable disciplines (docs/project-governance/CHARTER.md — D1–D10) — break these and the work is wrong
+## Non-negotiable disciplines (docs/project-governance/CHARTER.md — D1–D11) — break these and the work is wrong
 
 - **D1 Verify by execution.** Never conclude without running it. Every non-trivial claim is
   backed by a test. Prefer exhaustive checks over the 256 ring where feasible.
@@ -44,6 +44,9 @@ so the Rosetta x86_64 dev Python and a native arm64 one coexist. Native run (4x 
   imports. Don't force ring behavior onto standard math or vice-versa.
 - **Naming obeys 5W (D10).** Minted names answer Who/What/When/Where/Why and stay ORIGINAL:
   our namespaces are never named after the libraries they replace (`rnp` not numpy, `rmath` not math).
+- **Math and physics first (D11).** Ask the mathematical/physical form BEFORE building. The physics
+  here is QUANTUM, realized through MPRC (spins, vacuums, quantum walk, gauge, criticality) — never
+  a re-implementation of standard-model/continuum methods; those are labeled handles only.
 
 ## The honesty bar for ANY learning/ML claim
 
