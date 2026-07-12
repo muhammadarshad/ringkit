@@ -73,7 +73,8 @@ ringkit/
   ml/                autograd.py, tensor_autograd.py (TVar), optim.py, nn.py (low-level), attention.py
   kernels/           [D9 silicon] backend/ (ctypes loader __init__.py + ring_ops.c, zero-copy,
                      Python fallback), mprc/qcm/ (qcm_kernel.c, cache_manifold.c),
-                     mprc/lattice/ (gauge.c + host.py: ctypes host, py reference, float observables),
+                     mprc/lattice/ (gauge.c [threaded *_mt: static checkerboard slab bins, lock-free,
+                     bit-identical] + host.py: ctypes host, py reference, float observables),
                      apple/metal/ (ring_ops+gauge shaders, shim.m, host.py — all bit-for-bit
                      verified: elementwise OPT-IN [C wins, see backend.METAL_MIN]; gauge sweep AUTO
                      >=32^3 + derived-RNG thermalize [rk_mix32, 3-way bit-for-bit: py==C==metal] —

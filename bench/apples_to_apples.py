@@ -329,11 +329,11 @@ def bench_sweep_arrays(tdevs):
     pmasks = np_parity_masks(L, L, L)
     lib = lat._load()
 
-    def c_sweep():
+    def c_sweep():                                  # ringkit's real CPU offering: threaded slabs
         for par in (0, 1):
-            lib.metropolis_sweep(lat._ptr(g), lat._ptr(prop), lat._ptr(chance),
-                                 lat._ptr(lut), L, L, L, par)
-    cols = [f"ringkit-C {bench(c_sweep)*1e9/n:6.2f}"]
+            lib.metropolis_sweep_mt(lat._ptr(g), lat._ptr(prop), lat._ptr(chance),
+                                    lat._ptr(lut), L, L, L, par, lat.NTHREADS)
+    cols = [f"ringkit-C(mt) {bench(c_sweep)*1e9/n:6.2f}"]
     g3 = np.frombuffer(bytes(g), dtype=np.uint8).reshape(L, L, L).copy()
     p3 = np.frombuffer(bytes(prop), dtype=np.uint8).reshape(L, L, L)
     c3 = np.frombuffer(bytes(chance), dtype=np.uint8).reshape(L, L, L)

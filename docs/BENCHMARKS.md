@@ -37,24 +37,25 @@ pass beats temporary-array pipelines; the GPU round trip can't pay for a bandwid
 
 ### Metropolis sweep (arrays supplied), 128³ — ns/node/sweep, lower is better
 
-| ringkit C | numpy | torch cpu | torch mps | ringkit metal |
-|-----------|-------|-----------|-----------|---------------|
-| 10.91     | 18.45 | 7.48      | 10.16     | **0.78**      |
+| ringkit C (mt) | numpy | torch cpu | torch mps | ringkit metal |
+|----------------|-------|-----------|-----------|---------------|
+| 2.09           | 18.49 | 7.57      | 10.02     | **0.61**      |
 
-**Verdicts:** honest one first — **multithreaded torch-cpu beats our single-threaded C**
-(7.5 vs 10.9): threading the C sweep is a real future lever. But **ringkit metal is 9.6x
-faster than torch-cpu and 13x faster than torch-mps**, copies included.
+**Verdict:** the C kernels are now THREADED (static k-slab bins — checkerboard parity makes
+the bins predictable and lock-free, no merge step, bit-identical results): **ringkit C(mt)
+beats torch-cpu 3.6x**, erasing the earlier single-thread debt. ringkit metal stays 3.4x
+ahead of even that, 12-16x ahead of torch, copies included.
 
 ### Thermalize, derived RNG (rk_mix32), 8 sweeps — ns/node/sweep, lower is better
 
-| lattice | ringkit C | numpy | torch cpu | torch mps | ringkit metal GPU |
-|---------|-----------|-------|-----------|-----------|-------------------|
-| 128³    | 11.69     | 20.79 | 9.10      | 10.49     | **0.13**          |
-| 160³    | 11.94     | 21.70 | 8.13      | 10.89     | **0.12**          |
+| lattice | ringkit C (mt) | numpy | torch cpu | torch mps | ringkit metal GPU |
+|---------|----------------|-------|-----------|-----------|-------------------|
+| 128³    | 2.02           | 20.56 | 9.29      | 10.45     | **0.13**          |
+| 160³    | 2.03           | 21.54 | 7.98      | 10.96     | **0.14**          |
 
 **The headline verdict: on the SAME unified GPU, running the SAME bit-for-bit-gated
 algorithm, ringkit's Metal path is ~85x faster than torch-mps** (and ~65x faster than
-torch-cpu): ~8.5 G node-updates/s. The gap is architectural, not incidental: torch launches
+torch-cpu, ~15x vs our own threaded C): ~8 G node-updates/s. The gap is architectural: torch launches
 ~30 kernels per sweep and streams every intermediate (neighbor distances, dS, masks) through
 memory, while ringkit runs ONE fused kernel per parity — randoms derived in registers, grid
 resident, 2 x sweeps dispatches deep-queued in a single command buffer, and only grid + a
@@ -82,8 +83,9 @@ because the GPU never was emulated.
 2. Where structure exists (stencil), the fused C kernel beats numpy/torch by ~4x.
 3. Where the ring compute is dense (Metropolis + derived RNG), the unified-memory design
    wins by ~65-85x against engines using the same hardware — including torch on the same GPU.
-4. Fair-play debt recorded: torch-cpu's threading beats our single-threaded C sweep;
-   a threaded C path is a known lever if CPU-only hosts ever matter.
+4. Fair-play debt PAID: the C kernels are now threaded (predictable checkerboard bins ->
+   static slabs, lock-free, no merge; bit-identical, gated in test_gauge). ringkit C(mt)
+   beats torch-cpu ~4x on the sweep; the GPU path remains the ceiling.
 
 Reproduce: `~/.venvs/ringkit-bench/bin/python -m ringkit.bench.apples_to_apples` (native)
 or any interpreter with numpy (torch rows appear when importable). Gates print first and

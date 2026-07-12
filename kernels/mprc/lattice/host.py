@@ -15,6 +15,12 @@ import os
 import subprocess
 from ringkit.kernels.backend import _arch_flags, _BUILD, so_path
 
+# CPU threads for the *_mt kernels: bins are predictable (checkerboard slabs own disjoint
+# sites; boundary reads are opposite-parity) so threads run lock-free with no merge step.
+# Thread only above the floor — spawn cost dominates tiny lattices.
+NTHREADS = min(os.cpu_count() or 1, 16)
+MT_MIN_NODES = 1 << 14
+
 _DIR = os.path.dirname(__file__)
 _SO = so_path("gauge")                    # arch-keyed: x86_64/arm64 interpreters coexist
 _C = os.path.join(_DIR, "gauge.c")
@@ -49,7 +55,21 @@ def _bind(lib):
     lib.metropolis_sweep_rng.argtypes = [_U8, ctypes.c_uint, ctypes.c_uint, _U8,
                                          ctypes.c_long, ctypes.c_long, ctypes.c_long, ctypes.c_int]
     lib.metropolis_sweep_rng.restype = None
+    lib.metropolis_sweep_mt.argtypes = [_U8, _U8, _U8, _U8, ctypes.c_long, ctypes.c_long,
+                                        ctypes.c_long, ctypes.c_int, ctypes.c_int]
+    lib.metropolis_sweep_mt.restype = None
+    lib.metropolis_sweep_rng_mt.argtypes = [_U8, ctypes.c_uint, ctypes.c_uint, _U8,
+                                            ctypes.c_long, ctypes.c_long, ctypes.c_long,
+                                            ctypes.c_int, ctypes.c_int]
+    lib.metropolis_sweep_rng_mt.restype = None
+    lib.plaquette_mt.argtypes = [_U8, _U8, ctypes.c_long, ctypes.c_long, ctypes.c_long,
+                                 ctypes.c_int]
+    lib.plaquette_mt.restype = None
     return lib
+
+
+def _threads_for(n):
+    return NTHREADS if n >= MT_MIN_NODES else 1
 
 
 def _load():
@@ -99,6 +119,10 @@ def plaquette(g, W, H, D, blocked=True, force_python=False):
         return _py_plaquette(g, W, H, D)
     gb = g if isinstance(g, bytearray) else bytearray(g)
     e = bytearray(len(g))
+    nt = _threads_for(len(g))
+    if nt > 1:
+        lib.plaquette_mt(_ptr(e), _ptr(gb), W, H, D, nt)
+        return e
     fn = lib.plaquette_blocked if blocked else lib.plaquette
     fn(_ptr(e), _ptr(gb), W, H, D)
     return e
@@ -165,9 +189,10 @@ def sweep(grid, prop, chance, lut, W, H, D, force_python=False):
         _py_sweep(grid, prop, chance, lut, W, H, D, 0)
         _py_sweep(grid, prop, chance, lut, W, H, D, 1)
         return grid
+    pb, cb, lb = bytearray(prop), bytearray(chance), bytearray(lut)
+    nt = _threads_for(len(grid))
     for parity in (0, 1):
-        lib.metropolis_sweep(_ptr(grid), _ptr(bytearray(prop)), _ptr(bytearray(chance)),
-                             _ptr(bytearray(lut)), W, H, D, parity)
+        lib.metropolis_sweep_mt(_ptr(grid), _ptr(pb), _ptr(cb), _ptr(lb), W, H, D, parity, nt)
     return grid
 
 
@@ -255,9 +280,10 @@ def thermalize_rng(grid, seed, lut, W, H, D, sweeps, force_python=False):
             _py_sweep_rng(grid, seed, s, lut, W, H, D, 1)
         return grid
     lb = lut if isinstance(lut, bytearray) else bytearray(lut)
+    nt = _threads_for(len(grid))
     for s in range(sweeps):
         for parity in (0, 1):
-            lib.metropolis_sweep_rng(_ptr(grid), seed, s, _ptr(lb), W, H, D, parity)
+            lib.metropolis_sweep_rng_mt(_ptr(grid), seed, s, _ptr(lb), W, H, D, parity, nt)
     return grid
 
 

@@ -59,6 +59,27 @@ gauge.sweep(gc, prop, chance, lut, Ws, Hs, Ds, force_python=False)
 gauge.sweep(gp, prop, chance, lut, Ws, Hs, Ds, force_python=True)
 check("C sweep == Python sweep (bit-for-bit)", gc == gp)
 
+# threaded kernels: predictable bins (checkerboard slabs), no locks, no merge —
+# results must be BIT-IDENTICAL to single-threaded
+from ringkit.kernels.mprc.lattice import host as _lat
+_lib = _lat._load()
+gmt = bytearray(g0)
+for _par in (0, 1):
+    _lib.metropolis_sweep_mt(_lat._ptr(gmt), _lat._ptr(bytearray(prop)),
+                             _lat._ptr(bytearray(chance)), _lat._ptr(bytearray(lut)),
+                             Ws, Hs, Ds, _par, 8)
+check("mt(8) sweep == single-thread sweep (bit-for-bit)", gmt == gc)
+rst = bytearray(g0); rmt = bytearray(g0)
+for _s in range(2):
+    for _par in (0, 1):
+        _lib.metropolis_sweep_rng(_lat._ptr(rst), 42, _s, _lat._ptr(bytearray(lut)), Ws, Hs, Ds, _par)
+        _lib.metropolis_sweep_rng_mt(_lat._ptr(rmt), 42, _s, _lat._ptr(bytearray(lut)), Ws, Hs, Ds, _par, 8)
+check("mt(8) rng sweep == single-thread rng sweep (bit-for-bit)", rmt == rst)
+emt = bytearray(len(g0)); est = bytearray(len(g0))
+_lib.plaquette_mt(_lat._ptr(emt), _lat._ptr(bytearray(g0)), Ws, Hs, Ds, 8)
+_lib.plaquette(_lat._ptr(est), _lat._ptr(bytearray(g0)), Ws, Hs, Ds)
+check("mt(8) plaquette == single-thread plaquette (bit-for-bit)", emt == est)
+
 # thermalization: cold orders (action drops), hot stays disordered
 def run(beta, sweeps):
     g = bytearray(g0); L = gauge.boltzmann_lut(beta)

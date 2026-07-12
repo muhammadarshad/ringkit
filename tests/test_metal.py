@@ -86,7 +86,7 @@ check("full sweep (both parities): metal == C == python", gm == gc == gp)
 
 print("== gauge routing: measured crossover policy ==")
 check("metal passes the lattice-host self-test gate", lat._metal_gauge_ready())
-check("floor is 32^3 (measured: 24^3 C wins, 32^3 metal wins 1.3x -> 8.4x at 160^3)",
+check("floor is 32^3 (re-measured vs THREADED C: metal still wins every size >= 24^3)",
       lat.GAUGE_METAL_MIN_NODES == 1 << 15)
 W2 = H2 = D2 = 32
 n2 = W2 * H2 * D2
