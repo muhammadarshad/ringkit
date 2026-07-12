@@ -382,6 +382,73 @@ def bench_thermalize_rng(tdevs):
     print()
 
 
+def bench_gemm(tdevs):
+    """The linear-map campaign: ring GEMM (mod-256). ringkit variants: hardware-`*` bridge,
+    multiplier-free QSM table, multiplier-free shift-add. Externals gated per dtype trick."""
+    from ringkit.core import native as rn
+    from ringkit.kernels.backend import gemm as G
+    if not G.available():
+        print("── ring GEMM: silicon unavailable, skipped\n")
+        return
+    print("── ring GEMM C = A@B mod 256 — GMAC/s (higher is better)")
+
+    def ref(A, B, M, K, N):
+        C = bytearray(M * N)
+        for i in range(M):
+            for j in range(N):
+                acc = 0
+                for k in range(K):
+                    acc = (acc + rn.qsm(A[i * K + k], B[k * N + j])) & 0xFF
+                C[i * N + j] = acc
+        return bytes(C)
+
+    Mg, Kg, Ng = 8, 32, 8
+    Ag = bytearray(os.urandom(Mg * Kg)); Bg = bytearray(os.urandom(Kg * Ng))
+    want = ref(Ag, Bg, Mg, Kg, Ng)
+    nag = np.frombuffer(bytes(Ag), dtype=np.uint8).reshape(Mg, Kg)
+    nbg = np.frombuffer(bytes(Bg), dtype=np.uint8).reshape(Kg, Ng)
+    np_u8_ok = (nag @ nbg).tobytes() == want
+    np_f64_ok = ((nag.astype(np.float64) @ nbg.astype(np.float64)) % 256).astype(np.uint8).tobytes() == want
+    t_ok = {}
+    for dev in tdevs:
+        try:
+            ta = torch.from_numpy(nag.copy()).to(dev).to(torch.int32)
+            tb = torch.from_numpy(nbg.copy()).to(dev).to(torch.int32)
+            r = ((ta @ tb) & 0xFF).to(torch.uint8).cpu().numpy().tobytes()
+            t_ok[dev] = r == want
+        except Exception as e:
+            print(f"  torch-{dev} gemm: EXCLUDED ({type(e).__name__})")
+            t_ok[dev] = False
+    print(f"  gates: numpy-uint8 {'OK' if np_u8_ok else 'FAIL'} | numpy-f64-BLAS {'OK' if np_f64_ok else 'FAIL'}"
+          + "".join(f" | torch-{d}-i32 {'OK' if t_ok[d] else 'FAIL'}" for d in tdevs))
+
+    for L in (256, 512):
+        M = K = N = L
+        macs = M * K * N
+        A = bytearray(os.urandom(M * K)); B = bytearray(os.urandom(K * N))
+        cols = []
+        for v in G.VARIANTS:
+            t = bench(lambda: G.gemm(A, B, M, K, N, variant=v))
+            cols.append(f"rk-{v}(mt) {macs/t/1e9:6.2f}")
+        na = np.frombuffer(bytes(A), dtype=np.uint8).reshape(M, K)
+        nb = np.frombuffer(bytes(B), dtype=np.uint8).reshape(K, N)
+        if np_u8_ok:
+            t = bench(lambda: na @ nb)
+            cols.append(f"numpy-u8 {macs/t/1e9:6.2f}")
+        if np_f64_ok:
+            t = bench(lambda: ((na.astype(np.float64) @ nb.astype(np.float64)) % 256).astype(np.uint8))
+            cols.append(f"numpy-f64BLAS {macs/t/1e9:6.2f}")
+        for dev in tdevs:
+            if not t_ok.get(dev):
+                continue
+            ta = torch.from_numpy(na.copy()).to(dev).to(torch.int32)
+            tb = torch.from_numpy(nb.copy()).to(dev).to(torch.int32)
+            t = bench(lambda: (((ta @ tb) & 0xFF).to(torch.uint8), _sync(dev)))
+            cols.append(f"torch-{dev}-i32 {macs/t/1e9:6.2f}")
+        print(f"  {L}^3  " + "   ".join(cols))
+    print()
+
+
 def main():
     print("=" * 78)
     print("ringkit vs external engines — same semantics, same inputs, gated then timed")
@@ -400,6 +467,7 @@ def main():
     bench_plaquette(tdevs)
     bench_sweep_arrays(tdevs)
     bench_thermalize_rng(tdevs)
+    bench_gemm(tdevs)
     print("notes: external engines run device-resident tensors with hoisted masks (their best")
     print("case); ringkit-metal timings INCLUDE host-buffer copies (our real API cost). All")
     print("engines passed a bit-for-bit gate against the ringkit python reference first.")

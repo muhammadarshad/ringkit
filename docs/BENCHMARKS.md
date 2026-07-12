@@ -61,6 +61,32 @@ memory, while ringkit runs ONE fused kernel per parity — randoms derived in re
 resident, 2 x sweeps dispatches deep-queued in a single command buffer, and only grid + a
 256-byte LUT ever cross the bus.
 
+### Ring GEMM (C = A@B mod 256) — GMAC/s, higher is better
+
+The linear-map campaign, per the charter's bottleneck rule: ships a hardware-`*` bridge AND
+two MULTIPLIER-FREE forms that measure the thesis itself. All variants bit-for-bit gated
+against the rn.qsm Python reference; external dtype tricks gated too (numpy uint8 wrap,
+numpy f64-BLAS + mod, torch int32 + mask — all OK, incl. on MPS).
+
+| size | rk mul (mt) | rk shiftadd (mt, no `*`) | rk qsm (mt, no `*`) | numpy u8 | numpy f64 BLAS | torch cpu i32 | torch mps i32 |
+|------|-------------|--------------------------|---------------------|----------|----------------|---------------|---------------|
+| 256³ | **113.9**   | 34.6                     | 10.4                | 2.8      | 7.2            | 9.7           | 50.5          |
+| 512³ | **215.1**   | 54.9                     | 12.9                | 1.6      | 13.7           | 9.9           | 98.1          |
+
+**Verdicts:**
+
+- The D9 bridge beats EVERYTHING — numpy-uint8 by 138x, Accelerate f64-BLAS by 16x,
+  torch-cpu by 22x, and torch's GPU matmul by 2.2x. (Integer mod-256 GEMM is a hole in the
+  big engines: BLAS is float-only, so their integer paths are naive loops.)
+- **The thesis result: shift-add — the ring's own multiplication, ZERO hardware multiplies —
+  outruns every external engine's CPU path including BLAS.** Multiplier-free reaches 25% of
+  the multiplier bridge on silicon DESIGNED around multipliers; that is the honest measured
+  cost of the bypass on commodity hardware, and it still wins the external race.
+- QSM (table form) ties f64-BLAS on CPU; gathers don't vectorize on NEON. Its natural home
+  is LUT-fabric silicon (GPU table memory / FPGA) — the future Metal LUT-GEMM experiment.
+- Consequence applied: rnp tensor matmul now routes through the kernel (was pure-python,
+  ~5,000x slower than numpy; now ~100x FASTER than numpy-uint8 at scale). Facade unchanged.
+
 ## Rosetta environment (appendix) — same date
 
 python 3.14.6 x86_64 under Rosetta 2, numpy 2.4.6, no torch wheels. Both CPU columns equally

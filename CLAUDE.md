@@ -74,7 +74,9 @@ ringkit/
                      sim.py (Gauge facade class)
   ml/                autograd.py, tensor_autograd.py (TVar), optim.py, nn.py (low-level), attention.py
   kernels/           [D9 silicon] backend/ (ctypes loader __init__.py + ring_ops.c, zero-copy,
-                     Python fallback), mprc/qcm/ (qcm_kernel.c, cache_manifold.c),
+                     Python fallback; gemm.py + ring_gemm.c: ring GEMM in 3 gated variants —
+                     hardware-`*` bridge 215 GMAC/s, multiplier-free shiftadd 55 [beats BLAS],
+                     multiplier-free QSM table 13 — serves rnp matmul), mprc/qcm/ (qcm_kernel.c, cache_manifold.c),
                      mprc/lattice/ (gauge.c [threaded *_mt: static checkerboard slab bins, lock-free,
                      bit-identical] + host.py: ctypes host, py reference, float observables),
                      apple/metal/ (ring_ops+gauge shaders, shim.m, host.py — all bit-for-bit
@@ -83,7 +85,7 @@ ringkit/
                      0.21 ns/node/sweep at 160^3+, 57x over C), mprc/hpq/ + nvidia/cuda/ +
                      apple/ml/ (placeholders; CoreML descoped — unified-GPU focus),
                      build/ (arch-keyed .so, gitignored)
-  tests/             one test_<module>.py each; run_all.py aggregates (18 suites)
+  tests/             one test_<module>.py each; run_all.py aggregates (19 suites)
   bench/             apples-to-apples vs numpy/torch (C6 scaffolding — the ONLY place standard
                      engines may be imported; baselines bit-for-bit gated before timing).
                      Results: docs/BENCHMARKS.md (native fight: GPU thermalize ~85x vs torch-mps
@@ -105,7 +107,7 @@ Every facade object hides ring internals and exposes `.raw` for power users.
 
 ## Status
 
-All 18 suites green. Substrate (core/stats/linalg/rnp/physics/ml/kernels) is production-grade
+All 19 suites green. Substrate (core/stats/linalg/rnp/physics/ml/kernels) is production-grade
 and AST-clean (ops AND float literals — gauge/sim/data brought into compliance 2026-07-12). Facades (`rk.nn`, `rk.data`, `rk.physics`) built and verified with held-out + controls.
 Next candidates: stacked multi-block trained model, rnp-surface polish, top-level quickstart,
 Apple backends (docs/project-governance/APPLE_BACKENDS_SRD.md).

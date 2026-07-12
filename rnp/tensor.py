@@ -18,7 +18,8 @@ Note: basic indexing returns COPIES (not memory-sharing views). Augmented assign
 import itertools
 from ringkit.core import native as rn
 from ringkit.stats import stats as rs
-from ringkit.kernels import backend as _k     # silicon fast-path (zero-copy on the C buffer)
+from ringkit.kernels import backend as _k
+from ringkit.kernels.backend import gemm as _gemm     # silicon fast-path (zero-copy on the C buffer)
 
 from ringkit.core.constants import TAU
 
@@ -398,6 +399,11 @@ def transpose(t, *axes):
 def _matmul2d(a, b):
     m, k = a.shape
     n = b.shape[1]
+    # silicon fast path (D9, bit-for-bit self-tested at load): tensors are always contiguous
+    # row-major, so a.data/b.data feed the kernel directly; python loop is the reference.
+    C = _gemm.gemm(a.data, b.data, m, k, n, variant=_gemm.DEFAULT_VARIANT)
+    if C is not None:
+        return RingTensor(C, (m, n), unit="energy")
     out = []
     for i in range(m):
         row_i = [a[i, kk] for kk in range(k)]
