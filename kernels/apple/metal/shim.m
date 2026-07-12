@@ -8,12 +8,14 @@
 #import <Foundation/Foundation.h>
 #include <string.h>
 
-#define RK_ABI 4
+#define RK_ABI 5
 
 static id<MTLDevice> g_dev = nil;
 static id<MTLCommandQueue> g_queue = nil;
-// 0 mul, 1 add, 2 sub, 3 plaquette, 4 metropolis_sweep, 5 metropolis_sweep_rng
-static id<MTLComputePipelineState> g_pso[6] = {nil, nil, nil, nil, nil, nil};
+// 0 mul, 1 add, 2 sub, 3 plaquette, 4 metropolis_sweep, 5 metropolis_sweep_rng,
+// 6 gemm_mul, 7 gemm_qsm
+static id<MTLComputePipelineState> g_pso[8] = {nil};
+static id<MTLBuffer> g_qsq = nil;           // quarter-square table q[t]=floor(t^2/4), t<=510
 
 typedef struct { unsigned int W, H, D, parity; } RKGaugeParams;
 typedef struct { unsigned int W, H, D, parity, seed, sweep; } RKRngParams;
@@ -34,15 +36,62 @@ int rk_metal_init(const char *src_utf8) {
         if (!lib) return -2;
         g_queue = [g_dev newCommandQueue];
         if (!g_queue) return -3;
-        const char *names[6] = {"ring_mul", "ring_add", "ring_sub",
-                                "plaquette", "metropolis_sweep", "metropolis_sweep_rng"};
-        for (int k = 0; k < 6; k++) {
+        const char *names[8] = {"ring_mul", "ring_add", "ring_sub",
+                                "plaquette", "metropolis_sweep", "metropolis_sweep_rng",
+                                "gemm_mul", "gemm_qsm"};
+        for (int k = 0; k < 8; k++) {
             id<MTLFunction> fn = [lib newFunctionWithName:
                                   [NSString stringWithUTF8String:names[k]]];
             if (!fn) return -4;
             g_pso[k] = [g_dev newComputePipelineStateWithFunction:fn error:&err];
             if (!g_pso[k]) return -5;
         }
+        /* quarter-square table, built by odd-number accumulation (adds + shifts only) */
+        g_qsq = [g_dev newBufferWithLength:511 * sizeof(unsigned short)
+                                   options:MTLResourceStorageModeShared];
+        if (!g_qsq) return -6;
+        unsigned short *q = (unsigned short *)g_qsq.contents;
+        unsigned int sq = 0;
+        q[0] = 0;
+        for (int t = 1; t <= 510; t++) {
+            sq += (unsigned int)(t + t - 1);
+            q[t] = (unsigned short)(sq >> 2);
+        }
+        return 0;
+    }
+}
+
+typedef struct { unsigned int M, K, N; } RKGemmParams;
+
+// variant: 0 = mul (hardware-* bridge), 1 = qsm (multiplier-free LUT). Returns 0 on success.
+int rk_metal_gemm(int variant, unsigned char *C, const unsigned char *A,
+                  const unsigned char *B, long M, long K, long N) {
+    int pidx = variant == 0 ? 6 : 7;
+    if (variant < 0 || variant > 1 || !g_pso[pidx] || M < 1 || K < 1 || N < 1) return -1;
+    @autoreleasepool {
+        id<MTLBuffer> ba = [g_dev newBufferWithBytes:A length:M * K
+                                             options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bb = [g_dev newBufferWithBytes:B length:K * N
+                                             options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bc = [g_dev newBufferWithLength:M * N
+                                              options:MTLResourceStorageModeShared];
+        if (!ba || !bb || !bc) return -2;
+        RKGemmParams p = {(unsigned int)M, (unsigned int)K, (unsigned int)N};
+        id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:g_pso[pidx]];
+        [enc setBuffer:bc offset:0 atIndex:0];
+        [enc setBuffer:ba offset:0 atIndex:1];
+        [enc setBuffer:bb offset:0 atIndex:2];
+        [enc setBytes:&p length:sizeof(p) atIndex:3];
+        [enc setBuffer:g_qsq offset:0 atIndex:4];
+        [enc dispatchThreads:MTLSizeMake((NSUInteger)N, (NSUInteger)M, 1)
+       threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.status != MTLCommandBufferStatusCompleted) return -3;
+        memcpy(C, bc.contents, (size_t)(M * N));
         return 0;
     }
 }

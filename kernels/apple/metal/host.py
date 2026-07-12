@@ -14,10 +14,11 @@ import platform
 import subprocess
 from ringkit.kernels.backend import _arch_flags, _BUILD, so_path
 
-_ABI = 4
+_ABI = 5
 _DIR = os.path.dirname(__file__)
 _SHIM_C = os.path.join(_DIR, "shim.m")
-_METAL_SRCS = (os.path.join(_DIR, "ring_ops.metal"), os.path.join(_DIR, "gauge.metal"))
+_METAL_SRCS = (os.path.join(_DIR, "ring_ops.metal"), os.path.join(_DIR, "gauge.metal"),
+               os.path.join(_DIR, "gemm.metal"))
 _SO = so_path("metal_shim")
 _U8 = ctypes.POINTER(ctypes.c_uint8)
 _OPS = {"ring_mul": 0, "ring_add": 1, "ring_sub": 2}
@@ -73,6 +74,9 @@ def _load():
                                                 ctypes.c_long, ctypes.c_long, ctypes.c_long,
                                                 ctypes.c_long]
         lib.rk_metal_thermalize_rng.restype = ctypes.c_int
+        lib.rk_metal_gemm.argtypes = [ctypes.c_int, _U8, _U8, _U8,
+                                      ctypes.c_long, ctypes.c_long, ctypes.c_long]
+        lib.rk_metal_gemm.restype = ctypes.c_int
         lib.rk_metal_device_name.restype = ctypes.c_char_p
         src = b"\n".join(open(p, "rb").read() for p in _METAL_SRCS)
         if lib.rk_metal_init(src) != 0:
@@ -135,6 +139,19 @@ def thermalize_rng(grid, seed, sweep0, lut, W, H, D, sweeps):
     lb = lut if isinstance(lut, bytearray) else bytearray(lut)
     return lib.rk_metal_thermalize_rng(_ptr(grid), seed & 0xFFFFFFFF, sweep0 & 0xFFFFFFFF,
                                        _ptr(lb), W, H, D, sweeps)
+
+
+GEMM_VARIANTS = {"mul": 0, "qsm": 1}
+
+
+def gemm(variant, C, A, B, M, K, N):
+    """Ring GEMM on the GPU (mul bridge or multiplier-free QSM LUT). Returns 0 on success."""
+    lib = _load()
+    if lib is None or variant not in GEMM_VARIANTS:
+        return -1
+    Ab = A if isinstance(A, bytearray) else bytearray(A)
+    Bb = B if isinstance(B, bytearray) else bytearray(B)
+    return lib.rk_metal_gemm(GEMM_VARIANTS[variant], _ptr(C), _ptr(Ab), _ptr(Bb), M, K, N)
 
 
 def gauge_sweep(grid, prop, chance, lut, W, H, D):

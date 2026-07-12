@@ -82,6 +82,21 @@ check("matvec via tensor == reference",
       bytes((a @ rnp.array(b_list[:20])).data)
       == bytes(reference(bytearray(a_list), bytearray(b_list[:20]), 12, 20, 1)))
 
+print("== Metal GPU GEMM (skip-as-pass off-Mac): both variants == reference ==")
+from ringkit.kernels.apple.metal import host as mh
+if not mh.available():
+    print("  SKIP  no Metal device — CPU variants already verified")
+else:
+    Mm, Km, Nm = 16, 40, 24
+    Am = bytearray(random.randrange(256) for _ in range(Mm * Km))
+    Bm = bytearray(random.randrange(256) for _ in range(Km * Nm))
+    wm = reference(Am, Bm, Mm, Km, Nm)
+    allok = True
+    for v in ("mul", "qsm"):
+        Cm = bytearray(Mm * Nm)
+        allok &= mh.gemm(v, Cm, Am, Bm, Mm, Km, Nm) == 0 and Cm == wm
+    check("metal gemm mul + qsm(no-`*` LUT) == reference", allok)
+
 print("== default variant is a gated member ==")
 check("DEFAULT_VARIANT valid", gemm.DEFAULT_VARIANT in gemm.VARIANTS)
 

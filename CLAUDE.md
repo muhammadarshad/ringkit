@@ -79,10 +79,10 @@ ringkit/
                      multiplier-free QSM table 13 — serves rnp matmul), mprc/qcm/ (qcm_kernel.c, cache_manifold.c),
                      mprc/lattice/ (gauge.c [threaded *_mt: static checkerboard slab bins, lock-free,
                      bit-identical] + host.py: ctypes host, py reference, float observables),
-                     apple/metal/ (ring_ops+gauge shaders, shim.m, host.py — all bit-for-bit
-                     verified: elementwise OPT-IN [C wins, see backend.METAL_MIN]; gauge sweep AUTO
-                     >=32^3 + derived-RNG thermalize [rk_mix32, 3-way bit-for-bit: py==C==metal] —
-                     0.21 ns/node/sweep at 160^3+, 57x over C), mprc/hpq/ + nvidia/cuda/ +
+                     apple/metal/ (ring_ops+gauge+gemm shaders, shim.m, host.py — all bit-for-bit
+                     verified: elementwise OPT-IN [C wins]; gauge sweep AUTO >=32^3 + derived-RNG
+                     thermalize [rk_mix32, py==C==metal] 0.12 ns/node/sweep; GPU GEMM mul 105 /
+                     qsm-LUT 59 GMAC/s [zero-multiply, beats torch-mps] — CPU bridge keeps route), mprc/hpq/ + nvidia/cuda/ +
                      apple/ml/ (placeholders; CoreML descoped — unified-GPU focus),
                      build/ (arch-keyed .so, gitignored)
   tests/             one test_<module>.py each; run_all.py aggregates (19 suites)

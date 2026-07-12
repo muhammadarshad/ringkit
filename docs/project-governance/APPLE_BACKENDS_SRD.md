@@ -69,7 +69,17 @@ Mersenne RNG now dominates (2 x 33 MB of randoms per 8-sweep batch). Next levers
    newBufferWithBytesNoCopy — UMA means the copy in rk_metal_thermalize is pure waste.
 3. **Persistent GPU session**: keep grid + LUT as living MTLBuffers across facade calls
    (thermalize -> action -> thermalize), syncing back only on observable reads.
-4. Multi-command-buffer overlap (fill randoms for batch k+1 while batch k runs).
+4. ~~Multi-command-buffer overlap (fill randoms for batch k+1 while batch k runs)~~ —
+   OBSOLETE: the derived counter RNG (item 1) removed random uploads entirely; there is
+   nothing left to overlap. Kept for the record.
+
+**Benchmark campaign (bench/apples_to_apples + docs/BENCHMARKS.md): COMPLETE 2026-07-12.**
+Native fair fight incl. torch-mps on the same GPU; all engines bit-for-bit gated; physics
+kernels swept, ring GEMM campaign measured (bridge 215 GMAC/s, multiplier-free shift-add
+beats BLAS). Remaining open GPU items: ~~Metal GEMM~~ DONE 2026-07-12 (gemm.metal mul + qsm-LUT, ABI 5,
+bit-for-bit gated: metal-mul 105 GMAC/s = 2x torch-mps; metal-qsm ZERO-multiply 59 GMAC/s
+BEATS torch-mps's hardware-mul matmul — the LUT thesis on GPU fabric; CPU bridge 217 keeps
+the tensor route). Persistent GPU session (item 3) still open.
 
 ## Phase 2 — CoreML/ANE (kernels/apple/ml/) [DESCOPED 2026-07-12]
 

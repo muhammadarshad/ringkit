@@ -445,6 +445,11 @@ def bench_gemm(tdevs):
             tb = torch.from_numpy(nb.copy()).to(dev).to(torch.int32)
             t = bench(lambda: (((ta @ tb) & 0xFF).to(torch.uint8), _sync(dev)))
             cols.append(f"torch-{dev}-i32 {macs/t/1e9:6.2f}")
+        if mh.available():
+            for v in ("mul", "qsm"):
+                Cg = bytearray(M * N)
+                t = bench(lambda: mh.gemm(v, Cg, A, B, M, K, N))
+                cols.append(f"rk-metal-{v} {macs/t/1e9:6.2f}")
         print(f"  {L}^3  " + "   ".join(cols))
     print()
 

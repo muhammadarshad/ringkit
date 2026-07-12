@@ -73,6 +73,10 @@ numpy f64-BLAS + mod, torch int32 + mask — all OK, incl. on MPS).
 | 256³ | **113.9**   | 34.6                     | 10.4                | 2.8      | 7.2            | 9.7           | 50.5          |
 | 512³ | **215.1**   | 54.9                     | 12.9                | 1.6      | 13.7           | 9.9           | 98.1          |
 
+**Metal GPU rows (same run, same gates):** rk-metal-mul 104.9 GMAC/s, rk-metal-qsm
+(multiplier-free LUT) 59.0, torch-mps-i32 52.9 at 512^3. (torch-mps measured 53-98 across
+runs — GPU clock variance; ringkit rows were stable.)
+
 **Verdicts:**
 
 - The D9 bridge beats EVERYTHING — numpy-uint8 by 138x, Accelerate f64-BLAS by 16x,
@@ -82,8 +86,14 @@ numpy f64-BLAS + mod, torch int32 + mask — all OK, incl. on MPS).
   outruns every external engine's CPU path including BLAS.** Multiplier-free reaches 25% of
   the multiplier bridge on silicon DESIGNED around multipliers; that is the honest measured
   cost of the bypass on commodity hardware, and it still wins the external race.
-- QSM (table form) ties f64-BLAS on CPU; gathers don't vectorize on NEON. Its natural home
-  is LUT-fabric silicon (GPU table memory / FPGA) — the future Metal LUT-GEMM experiment.
+- QSM (table form) ties f64-BLAS on CPU; gathers don't vectorize on NEON. **On the GPU the
+  LUT thesis lands: metal-qsm (zero multiplies) runs at 56% of metal-mul — the multiplier-free
+  penalty shrinks from ~20x (CPU table) to 1.8x on LUT-friendly fabric — and BEATS torch-mps's
+  hardware-multiplier matmul on the same silicon.** Strongest evidence yet for the MPRC
+  bottleneck-bypass on the right substrate.
+- Routing: the CPU mul bridge (217) stays the tensor default; metal GEMM is registered and
+  gated but not routed (105 < 217 — the copies + one-thread-per-element kernel leave GPU
+  headroom for a tiled follow-up if ever needed).
 - Consequence applied: rnp tensor matmul now routes through the kernel (was pure-python,
   ~5,000x slower than numpy; now ~100x FASTER than numpy-uint8 at scale). Facade unchanged.
 
