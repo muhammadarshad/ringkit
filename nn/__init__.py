@@ -15,11 +15,13 @@ attention — is handled for you. You never touch mod-256, vacuums, or strides.
 Escape hatch: every layer exposes `.raw` (the underlying ring weights) for power users who DO
 want the internals. Regular engineers can ignore it entirely.
 
-Modules: layers (Layer/Linear/Dense/Sequential), transformer (RoPE/Attention/Transformer).
+Modules: layers (Layer/Linear/Dense/Sequential), transformer (RoPE/Attention/Transformer/
+HopBlock/Stacked — stacked multi-block trained recall).
 """
 from ringkit.ml import attention as _attn
 from ringkit.nn.layers import Layer, Linear, Dense, Sequential
-from ringkit.nn.transformer import (positional_encode, Attention, TransformerBlock, Transformer)
+from ringkit.nn.transformer import (positional_encode, Attention, TransformerBlock,
+                                    Transformer, HopBlock, Stacked)
 
 # re-export content-based attention at the framework level (the real transformer primitive)
 attention = _attn.attend

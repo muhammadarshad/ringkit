@@ -120,3 +120,64 @@ class Transformer(Layer):
     @property
     def raw(self):
         return {"decoder": self.decoder.raw, "rope": self.rope, "key_dim": self.key_dim}
+
+
+class HopBlock(Layer):
+    """One TRAINED attention hop: a solve-fit Linear query-map + hard content attention.
+    fit() learns the exact ring map that carries this hop's incoming representation into
+    its memory's key space (linalg.solve — no descent). The hop then routes by content."""
+
+    def __init__(self, dim):
+        self.dim = int(dim)
+        self.qmap = Linear(self.dim, self.dim)
+
+    def fit(self, X, Y):
+        self.qmap.fit(X, Y)
+        self.train_exact = self.qmap.train_exact
+        return self
+
+    def __call__(self, q, K, V):
+        out, who = _attn.attend([self.qmap(q)], _as_rows(K), _as_rows(V), hard=True)
+        return out[0], who[0]
+
+    @property
+    def raw(self):
+        return {"qmap": self.qmap.raw, "dim": self.dim}
+
+
+class Stacked(Layer):
+    """Stacked multi-block trained model: depth-d recall composes d trained attention hops —
+    block b's retrieved value becomes block b+1's query. Each block is trained by EXACT
+    solve (the ring way), and the capability is genuinely deep: a (d-1)-block model fails
+    the same task (the depth control in tests/test_stacked.py), as does a random-trained
+    block. Ring internals stay hidden; `.raw` exposes them."""
+
+    def __init__(self, blocks=2, dim=2):
+        self.dim = int(dim)
+        self.blocks = [HopBlock(self.dim) for _ in range(int(blocks))]
+
+    def fit(self, per_block):
+        """per_block: one (X, Y) training set per hop — X the hop's incoming representation,
+        Y the matching key-space rows. Each hop is solved independently (predictable bins)."""
+        if len(per_block) != len(self.blocks):
+            raise ValueError(f"Stacked.fit: {len(per_block)} training sets for {len(self.blocks)} blocks")
+        for blk, (X, Y) in zip(self.blocks, per_block):
+            blk.fit(X, Y)
+        self.train_exact = all(getattr(b, "train_exact", False) for b in self.blocks)
+        return self
+
+    def recall(self, memories, query):
+        """Route `query` through every hop: memories = [(K_b, V_b)] per block. Returns
+        (final value row, [matched position per hop])."""
+        if len(memories) != len(self.blocks):
+            raise ValueError(f"Stacked.recall: {len(memories)} memories for {len(self.blocks)} blocks")
+        q = list(query)
+        path = []
+        for blk, (K, V) in zip(self.blocks, memories):
+            q, who = blk(q, K, V)
+            path.append(who)
+        return q, path
+
+    @property
+    def raw(self):
+        return {"blocks": [b.raw for b in self.blocks], "dim": self.dim}

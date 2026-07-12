@@ -85,7 +85,7 @@ ringkit/
                      qsm-LUT 59 GMAC/s [zero-multiply, beats torch-mps] — CPU bridge keeps route), mprc/hpq/ + nvidia/cuda/ +
                      apple/ml/ (placeholders; CoreML descoped — unified-GPU focus),
                      build/ (arch-keyed .so, gitignored)
-  tests/             one test_<module>.py each; run_all.py aggregates (19 suites)
+  tests/             one test_<module>.py each; run_all.py aggregates (20 suites)
   bench/             apples-to-apples vs numpy/torch (C6 scaffolding — the ONLY place standard
                      engines may be imported; baselines bit-for-bit gated before timing).
                      Results: docs/BENCHMARKS.md (native fight: GPU thermalize ~85x vs torch-mps
@@ -95,7 +95,9 @@ ringkit/
 
 ringkit/nn/          FACADE (top-level pkg): layers.py (Layer, Linear, Dense, Sequential),
                      transformer.py (RoPE, Attention, TransformerBlock, Transformer: induction +
-                     in-context recall). All re-exported at rk.nn. Ring hidden; .raw hatch.
+                     in-context recall; HopBlock + Stacked: multi-block solve-trained deep recall,
+                     held-out 1.0 with depth + random controls at chance). All re-exported at
+                     rk.nn. Ring hidden; .raw hatch.
 ringkit/rmath.py     stdlib-math REPLACEMENT (original name, D10): math-shaped handles (sin/cos/exp/
                      log/isqrt, tau/pi/e with e = RING_E = 3) re-exported from core — no behavior of its own
 ringkit/data.py      FACADE: encode/encode_range, one_hot, split, batches
@@ -107,7 +109,7 @@ Every facade object hides ring internals and exposes `.raw` for power users.
 
 ## Status
 
-All 19 suites green. Substrate (core/stats/linalg/rnp/physics/ml/kernels) is production-grade
+All 20 suites green. Substrate (core/stats/linalg/rnp/physics/ml/kernels) is production-grade
 and AST-clean (ops AND float literals — gauge/sim/data brought into compliance 2026-07-12). Facades (`rk.nn`, `rk.data`, `rk.physics`) built and verified with held-out + controls.
-Next candidates: stacked multi-block trained model, rnp-surface polish, top-level quickstart,
-Apple backends (docs/project-governance/APPLE_BACKENDS_SRD.md).
+Next candidates: rnp-surface polish, top-level quickstart. Apple backends: Phases 0-1c
+DONE (docs/project-governance/APPLE_BACKENDS_SRD.md); CoreML descoped.
