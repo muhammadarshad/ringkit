@@ -1,5 +1,31 @@
 """
-ringkit.ml.kvcodec — sub-byte KV compression, ring-native. OUR construction, measured.
+ringkit.ml.kvcodec — sub-byte KV compression, ring-native. PROVISIONAL — DO NOT TRUST THE NUMBERS.
+
+╔══════════════════════════════════════════════════════════════════════════════════════════════╗
+║ TWO REASONS THIS MODULE IS NOT DONE. Read before quoting any figure out of it.                ║
+║                                                                                              ║
+║ 1. THE BENCHMARK IS BLIND. Every retrieval number below was produced by a routing test whose ║
+║    KNOWN-BAD control does not fail. An EVEN stride (x8) provably destroys information — it    ║
+║    maps 256 ring values onto 32 codes, irreversibly — and it STILL scores 1.00, at N = 12,    ║
+║    64, 256 and 1024. A compression benchmark that a known-lossy codec passes cannot           ║
+║    distinguish a good codec from a bad one. So "0.48 -> 1.00 at 2 bits" does NOT mean the     ║
+║    compression is good; it means the task is too easy to see loss. A valid bar must measure   ║
+║    KEY RECOVERY / VALUE FIDELITY, not 1-of-N routing. Until the control fails, these numbers  ║
+║    establish nothing.                                                                        ║
+║                                                                                              ║
+║ 2. IT ENCODES THE WRONG OBJECT. The real spec is hpq-kernel-rust/src/polar.rs: a KV element   ║
+║    is a POLAR PAIR (tick: u8, mag: u8) — an ANGLE and a MAGNITUDE — not the single flat phase ║
+║    byte this module quantizes. For K the RoPE tick is baked in at write time (which ringkit   ║
+║    already does, exactly, additively); for V the tick is a 2-bin SIGN (0 = +, 128 = -) and    ║
+║    the information lives in mag. Per-element (tick, mag) IS our (phase, energy). This module  ║
+║    has NO magnitude channel at all, so it is quantizing half the object.                     ║
+║    Still open in the spec: "4 diffusion style processing" over the four 64-chunks — asked for ║
+║    by the owner, not yet specified to me, NOT guessed at here.                                ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════╝
+
+What IS solid and separable: ml/kvcache.py (the soft-attention primitive, cached==uncached
+bit-for-bit), the C-owned prime-pitched slab, and the 1.14x cache-manifold measurement. Those do
+not depend on anything in this file.
 
 D11 — the form, and the honest record of what was TRIED and what the ring actually rewarded.
 

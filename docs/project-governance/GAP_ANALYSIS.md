@@ -65,7 +65,7 @@ the two attached reference projects.
 | **`nn.Embedding` (learned lookup table)** | ✅ | ❌ | needed for text/image tokens |
 | **Softmax attention (soft weights)** | ✅ | ✅ **BUILT + verified** — `ml/kvcache.py` Boltzmann-weighted soft attention (temperature `beta`, geometric-decay weights, circular value blend); hard argmax is only the `beta→∞` cold limit. `tests/test_kvcache.py` ALL PASS (cached==uncached bit-for-bit; uniform→soft→argmax sweep; circular-blend control). | **learned** QKV + backward still gated on Axis-2 |
 | **LayerNorm / RMSNorm (ring-native)** | ✅ | ❌ | normalization is float in both refs |
-| **GELU / softmax / activations (ring-native)** | ✅ | ⚠️ SIN activation only; **forward softmax has a form** (Boltzmann LUT + energy-domain normalize) but is unbuilt, and its derivative does not exist | forward: build it; **backward: open** |
+| **GELU / softmax / activations (ring-native)** | ✅ | ⚠️ SIN activation; **forward softmax is BUILT + verified** (Boltzmann LUT + energy-domain normalize + circular blend, `ml/kvcache.py`) — only its *derivative* is still open | forward: done; **backward: open** |
 | Conv2d / pooling | ✅ | ❌ | needed for image encoders |
 | **Loss functions (cross-entropy, InfoNCE) ring-native** | ✅ | ❌ | gates classifier + contrastive training |
 | Optimizers (Adam), LR schedules | ✅ | ⚠️ sign-SGD + coordinate descent (toy) | needs to scale |
