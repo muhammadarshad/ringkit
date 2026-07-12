@@ -38,13 +38,12 @@ for beta in (0, 1, 4, 16, 64, 128, 255):
         K = [vec() for _ in range(T)]
         V = [vec() for _ in range(T)]
         Q = [vec() for _ in range(T)]
-        # uncached: at step t, recompute the whole prefix from scratch
-        want = []
-        for t in range(T):
-            ref = kv.attend_full(Q[t:t + 1], K[:t + 1], V[:t + 1], beta=beta)[0]
-            want.append(ref)
-        # NOTE: attend_full ropes query row i by i; at step t the query is row 0 of a 1-row batch,
-        # so re-derive with the true position to keep the comparison honest.
+        # Feed OUT-OF-RANGE ints on some trials so the cache's &0xFF masking is actually exercised
+        # (otherwise both paths are trivially identical and the test proves nothing about folding).
+        if trial % 3 == 0:
+            K[0] = [x + 256 for x in K[0]]
+            V[0] = [x - 256 for x in V[0]]
+        # uncached reference: recompute the whole prefix from scratch at every step, on the RAW ints.
         want = []
         for t in range(T):
             Kp = [kv.rope(K[j], j) for j in range(t + 1)]
