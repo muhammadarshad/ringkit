@@ -5,8 +5,8 @@ import sys
 MODULES = [
     "test_constants", "test_native", "test_stats", "test_calculus", "test_linalg",
     "test_tensor", "test_rnp", "test_rmath", "test_physics", "test_ml", "test_tensor_autograd",
-    "test_attention", "test_nn_facade", "test_stacked", "test_data_facade", "test_physics_facade",
-    "test_kernels", "test_gemm", "test_gauge", "test_metal",
+    "test_attention", "test_kvcache", "test_nn_facade", "test_stacked", "test_data_facade",
+    "test_physics_facade", "test_kernels", "test_gemm", "test_gauge", "test_metal",
 ]
 
 

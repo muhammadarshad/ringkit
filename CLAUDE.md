@@ -78,7 +78,13 @@ ringkit/
                      decay), qcm.py (+ stride7_orbit: 36-bin vacuum-avoiding QCM walk), gauge.py
                      (EXPONENTIAL integer Boltzmann [geometric decay — the physics form], criticality
                      + mass_gap_scan), sim.py (Gauge facade: thermalize/action/order/profile/phase)
-  ml/                autograd.py, tensor_autograd.py (TVar), optim.py, nn.py (low-level), attention.py
+  ml/                autograd.py, tensor_autograd.py (TVar), optim.py, nn.py (low-level), attention.py,
+                     kvcache.py (RingKVCache + Boltzmann-soft attention: score in ENERGY, weights by
+                     geometric decay [gauge.boltzmann_lut — the ring exponential, NOT the periodic
+                     ring_exp], values blended CIRCULARLY around the winner [angles: a linear mean
+                     wraps], normalized once in ENERGY by mf_floordiv so no zero-divisor arises.
+                     RoPE applied at insert. Bar: cached == uncached BIT-FOR-BIT. Data-free: the
+                     ring IS the codebook — no scales/zero-points stored)
   kernels/           [D9 silicon] backend/ (ctypes loader __init__.py + ring_ops.c, zero-copy,
                      Python fallback; gemm.py + ring_gemm.c: ring GEMM in 3 gated variants —
                      hardware-`*` bridge 215 GMAC/s, multiplier-free shiftadd 55 [beats BLAS],
@@ -91,7 +97,7 @@ ringkit/
                      qsm-LUT 59 GMAC/s [zero-multiply, beats torch-mps] — CPU bridge keeps route), mprc/hpq/ + nvidia/cuda/ +
                      apple/ml/ (placeholders; CoreML descoped — unified-GPU focus),
                      build/ (arch-keyed .so, gitignored)
-  tests/             one test_<module>.py each; run_all.py aggregates (20 suites)
+  tests/             one test_<module>.py each; run_all.py aggregates (21 suites)
   bench/             apples-to-apples vs numpy/torch (C6 scaffolding — the ONLY place standard
                      engines may be imported; baselines bit-for-bit gated before timing).
                      Results: docs/BENCHMARKS.md (native fight: GPU thermalize ~85x vs torch-mps
@@ -100,6 +106,7 @@ ringkit/
                      ECOSYSTEM.md, MANIFEST.md)
 
 ringkit/nn/          FACADE (top-level pkg): layers.py (Layer, Linear, Dense, Sequential),
+                     KVCache (= ml.kvcache.RingKVCache) re-exported for decode-time attention,
                      transformer.py (RoPE, Attention, TransformerBlock, Transformer: induction +
                      in-context recall; HopBlock + Stacked: multi-block solve-trained deep recall,
                      held-out 1.0 with depth + random controls at chance). All re-exported at
@@ -115,7 +122,7 @@ Every facade object hides ring internals and exposes `.raw` for power users.
 
 ## Status
 
-All 20 suites green. Substrate (core/stats/linalg/rnp/physics/ml/kernels) is production-grade
+All 21 suites green. Substrate (core/stats/linalg/rnp/physics/ml/kernels) is production-grade
 and AST-clean (ops AND float literals — gauge/sim/data brought into compliance 2026-07-12). Facades (`rk.nn`, `rk.data`, `rk.physics`) built and verified with held-out + controls.
 Next candidates: rnp-surface polish. Quickstart DONE (README, identity-first per D11, all
 snippets executed). Apple backends Phases 0-1c DONE (APPLE_BACKENDS_SRD.md); CoreML descoped.
