@@ -40,6 +40,12 @@ so the Rosetta x86_64 dev Python and a native arm64 one coexist. Native run (4x 
 - **Exact vs approximate is labeled.** `SIN/COS` use the `_arch` semicircle (exact only at the 4
   cardinals; ~28–31% shape gap elsewhere). Never present an approximation as exact. Rotation by a
   quarter turn (`rotate`, iota) IS exact; general angle-addition is NOT.
+- **Never quantize the exact identity to save bits; never import a Euclidean/standard form to define it (CHARTER C9).**
+  The ARC/phase position (exact additive RoPE, exact Δtick, exact quadrant) is carried at FULL
+  precision, always. The ring-native KV element is **ADI (accumulation, differential)** —
+  `(x,y)→(x+y, x−y)`, exact/reversible/multiplier-free (`ml/kvadi.py`) — NOT the Euclidean polar
+  form (`atan2`+`sqrt(x²+y²)`), which is a lossy anti-pattern and was removed. Compression may crush
+  only redundant magnitude/energy, never the arc, and NEVER to beat a paper's bit-count.
 - **Names are handles.** Wilson/Metropolis/Euclidean etc. are borrowed labels, not standard-math
   imports. Don't force ring behavior onto standard math or vice-versa.
 - **Naming obeys 5W (D10).** Minted names answer Who/What/When/Where/Why and stay ORIGINAL:
@@ -48,6 +54,22 @@ so the Rosetta x86_64 dev Python and a native arm64 one coexist. Native run (4x 
   here is QUANTUM, realized through MPRC (spins, vacuums, quantum walk, gauge, criticality) — never
   a re-implementation of standard-model/continuum methods; those are labeled handles only. The forms
   are ONE interlocking physics, not a menu: the problem at hand selects which form to state first.
+
+## Stance: emulation engine vs OS (docs/project-governance/STANCE_emulation_vs_os.md)
+
+Traditional models we can't control (Gemma, external checkpoints) → ringkit is an **emulation
+engine** (like TurboQuant/PolarQuant: ingest weights, emulate the forward on the ring). The
+emulation code lives in **`ringkit/emulation/`** (`checkpoint`/`onix`/`infer`/`ract`/`gemma`/
+`gemma_weights`/`tokenizer`) + the `kernels/mprc/gemma/` kernel (energy-QSM GEMV + streaming f16
+LM-head argmax) — SEPARATE from the pure ring `nn` so it never disturbs the native stack.
+**PROVEN (docs/REPORT-GEMMA2.md): full Gemma2-2B autoregressive generation on the ring,
+float-free — "The capital of France is" → "Paris."** Weights streamed via mmap (2GB onix + 1.18GB
+embed as reclaimable page cache, ~230MB resident — stream, never materialize; hpq runs 8B on an
+iPhone 13). RoPE inv_freq is geometric (r^i) with cos/sin from a ring CORDIC; LM head = argmax of
+the raw dot (soft-cap is monotone). Gemma4-12B is the same path at G4_ config (next). Our MPRC architectures (RDT/Mamba2/QuantumRoPE) → ringkit is the **operating system**
+(native: `nn`/`core`/`physics`/`ml`). BOTH: no float, no FPU — every FPU op is replaced by a ringkit
+QCM-enabled primitive (`qsm`/`mul`, `ract.exp_fixed`, `boltzmann_lut`, `isqrt`, shifts). Do NOT copy
+the reference kernel (hpq is the WHAT; ringkit QCM code is the HOW); never a float fallback.
 
 ## The honesty bar for ANY learning/ML claim
 
@@ -122,7 +144,10 @@ Every facade object hides ring internals and exposes `.raw` for power users.
 
 ## Status
 
-All 21 suites green. Substrate (core/stats/linalg/rnp/physics/ml/kernels) is production-grade
-and AST-clean (ops AND float literals — gauge/sim/data brought into compliance 2026-07-12). Facades (`rk.nn`, `rk.data`, `rk.physics`) built and verified with held-out + controls.
-Next candidates: rnp-surface polish. Quickstart DONE (README, identity-first per D11, all
-snippets executed). Apple backends Phases 0-1c DONE (APPLE_BACKENDS_SRD.md); CoreML descoped.
+All suites green (run_all, incl. test_gemma2). Substrate (core/stats/linalg/rnp/physics/ml/kernels)
+is production-grade and AST-clean. Facades (`rk.nn`, `rk.data`, `rk.physics`) built and verified
+with held-out + controls. Emulation engine: loads real .pth (RDT/Mamba2) and Gemma .onix; ring
+inference verified bit-exact / cosine 1.0 vs float; **Gemma2-2B generates real text on the ring,
+float-free (REPORT-GEMMA2.md).** Quickstart DONE. Apple backends Phases 0-1c DONE; CoreML descoped.
+Next: Gemma4-12B autoregressive (same emulation path, G4_ config: 48 layers, sliding/global attn,
+partial rotation, per-layer scalars, per-head QK norm); speed (gelu LUT to cut per-token time).

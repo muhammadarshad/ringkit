@@ -10,3 +10,5 @@ from . import rcollections                  # ring-native data structures
 from .ml import autograd, optim
 from . import nn                            # engineer-facing model framework (torch-shaped)
 from . import data                          # engineer-facing data plumbing (encode/split/batch)
+from . import rlearn                        # classical ML, ring-native (sklearn-shaped)
+from . import emulation                      # EMULATION ENGINE (traditional models: checkpoint/onix/infer/ract) — SEPARATE from the pure ring nn

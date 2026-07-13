@@ -55,6 +55,32 @@ void kv_scores_walk(long * restrict out, const uint8_t * restrict K, const uint8
     }
 }
 
+/* Circular value blend around the winner (the rest of the attend hot path, on the ENERGY side).
+ * out[d] = ref[d] + trunc( sum_j w[j] * signed_offset(V[j][d], ref[d]) / sum_j w[j] )   (mod 256)
+ * signed_offset lives in [-127,128]; the divide truncates toward zero, matching the Python
+ * reference's sign-split mf_floordiv bit-for-bit. den > 0 is guaranteed by the caller (lut[0]=255);
+ * guarded anyway. Values are ARC (uint8); the weighted sum is ENERGY (signed long, never folded). */
+void kv_blend(uint8_t * restrict out, const uint8_t * restrict V, const long * restrict w,
+              long n, long dim, long pitch, long best) {
+    const uint8_t * restrict ref = V + best * pitch;
+    long den = 0;
+    for (long j = 0; j < n; j++) den += w[j];
+    if (den <= 0) { for (long d = 0; d < dim; d++) out[d] = ref[d]; return; }
+    for (long d = 0; d < dim; d++) {
+        int rd = (int)ref[d];
+        long num = 0;
+        for (long j = 0; j < n; j++) {
+            long wj = w[j];
+            if (wj) {
+                int off = (int)(uint8_t)(V[j * pitch + d] - rd);   /* signed_offset in [-127,128] */
+                if (off > 128) off -= 256;
+                num += wj * (long)off;                             /* qsm = exact product */
+            }
+        }
+        out[d] = (uint8_t)(rd + num / den);                        /* trunc toward zero */
+    }
+}
+
 /* Fused scan: score every key AND take the argmax in ONE pass, no intermediate array. */
 long kv_argmax(const uint8_t * restrict K, const uint8_t * restrict q,
                long n, long dim, long pitch, long * restrict best_out) {

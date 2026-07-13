@@ -78,6 +78,8 @@ def _load():
             fn.restype = None
         lib.kv_argmax.argtypes = [_U8, _U8, ctypes.c_long, ctypes.c_long, ctypes.c_long, _LONG]
         lib.kv_argmax.restype = ctypes.c_long
+        lib.kv_blend.argtypes = [_U8, _U8, _LONG, ctypes.c_long, ctypes.c_long, ctypes.c_long, ctypes.c_long]
+        lib.kv_blend.restype = None
         if _selftest(lib):
             _lib = lib
     except Exception:
@@ -140,6 +142,20 @@ def argmax(K, q, n, dim, pitch):
     return int(j), int(best.value)
 
 
+def blend(V_slab, w, n, dim, pitch, best):
+    """Circular value blend around V[best] over the prime-pitched value slab. C when available, else
+    the ringkit.ml.kvcache.circular_blend Python reference. Returns a dim-length list (ARC values)."""
+    lib = _load()
+    if lib is None:
+        from ringkit.ml import kvcache as _kv
+        V = [[V_slab[j * pitch + d] for d in range(dim)] for j in range(n)]
+        return _kv.circular_blend(V, list(w), best)
+    out = (ctypes.c_uint8 * dim)()
+    wl = (ctypes.c_long * n)(*[int(x) for x in w])
+    lib.kv_blend(out, _u8(V_slab), wl, n, dim, pitch, best)
+    return list(out)
+
+
 def _selftest(lib):
     """D9 gate: C must equal the multiplier-free reference BIT-FOR-BIT, or it does not serve."""
     import random
@@ -160,5 +176,167 @@ def _selftest(lib):
             j = lib.kv_argmax(_u8(K), _u8(q), n, dim, pitch, ctypes.byref(b))
             wj = max(range(n), key=lambda i: want[i])
             if want[int(j)] != want[wj]:
+                return False
+            # kv_blend must equal the circular_blend reference bit-for-bit
+            from ringkit.ml import kvcache as _kv
+            V_slab = bytearray(rnd.randrange(256) for _ in range(n * pitch))
+            w = [rnd.randrange(256) for _ in range(n)]
+            w[rnd.randrange(n)] = 255                       # ensure positive mass
+            Vrows = [[V_slab[jj * pitch + d] for d in range(dim)] for jj in range(n)]
+            best = max(range(n), key=lambda i: w[i])
+            out = (ctypes.c_uint8 * dim)()
+            wl = (ctypes.c_long * n)(*w)
+            lib.kv_blend(out, _u8(V_slab), wl, n, dim, pitch, best)
+            if list(out) != _kv.circular_blend(Vrows, w, best):
+                return False
+    return True
+
+
+# ── ADI element (ARC-only: encode/decode = differential/accumulation, uint8 mod 256) ──────────
+_C_ADI = os.path.join(_DIR, "kvadi.c")
+_adi = None
+_adi_tried = False
+
+
+def _build_adi():
+    os.makedirs(_BUILD, exist_ok=True)
+    so = so_path("kvadi")
+    if not os.path.exists(so) or os.path.getmtime(_C_ADI) > os.path.getmtime(so):
+        subprocess.run(["cc", "-O3", "-funroll-loops", "-shared", "-fPIC",
+                        *_arch_flags(), "-o", so, _C_ADI], check=True, capture_output=True)
+    return so
+
+
+def _load_adi():
+    global _adi, _adi_tried
+    if _adi_tried:
+        return _adi
+    _adi_tried = True
+    try:
+        lib = ctypes.CDLL(_build_adi())
+        for fn in (lib.adi_encode_batch, lib.adi_decode_batch):
+            fn.restype = None
+        lib.adi_encode_batch.argtypes = [_U8, _U8, _U8, ctypes.c_long, ctypes.c_long, ctypes.c_long]
+        lib.adi_decode_batch.argtypes = [_U8, _U8, _U8, ctypes.c_long, ctypes.c_long, ctypes.c_long]
+        if _selftest_adi(lib):
+            _adi = lib
+    except Exception:
+        _adi = None
+    return _adi
+
+
+def adi_available():
+    return _load_adi() is not None
+
+
+def adi_encode_batch(rows, R, dim, pitch):
+    """R rows (contiguous uint8 slab, row r at r*pitch) -> (leads bytearray, deltas slab). C fast
+    path when available, else the ringkit.ml.kvadi Python reference. ARC only (mod 256)."""
+    lib = _load_adi()
+    if lib is None:
+        return _py_adi_encode(rows, R, dim, pitch)
+    leads = bytearray(R)
+    deltas = bytearray(R * pitch)
+    lib.adi_encode_batch(_u8(leads), _u8(deltas), _u8(bytearray(rows)), R, dim, pitch)
+    return leads, deltas
+
+
+def adi_decode_batch(leads, deltas, R, dim, pitch):
+    """(leads, deltas slab) -> rows slab, exactly (accumulation). C when available, else Python."""
+    lib = _load_adi()
+    if lib is None:
+        return _py_adi_decode(leads, deltas, R, dim, pitch)
+    rows = bytearray(R * pitch)
+    lib.adi_decode_batch(_u8(rows), _u8(bytearray(leads)), _u8(bytearray(deltas)), R, dim, pitch)
+    return rows
+
+
+def _py_adi_encode(rows, R, dim, pitch):
+    """Semantic reference (multiplier-free): per-row ringkit.ml.kvadi.encode over the slab."""
+    from ringkit.ml import kvadi as ka
+    leads = bytearray(R)
+    deltas = bytearray(R * pitch)
+    for r in range(R):
+        base = 0
+        off = r * pitch
+        row = [rows[off + i] for i in range(dim)]
+        lead, delta = ka.encode(row)
+        leads[r] = lead
+        for i in range(len(delta)):
+            deltas[off + i] = delta[i]
+    return leads, deltas
+
+
+def _py_adi_decode(leads, deltas, R, dim, pitch):
+    from ringkit.ml import kvadi as ka
+    rows = bytearray(R * pitch)
+    for r in range(R):
+        off = r * pitch
+        delta = [deltas[off + i] for i in range(dim - 1)]
+        row = ka.decode(leads[r], delta)
+        for i in range(dim):
+            rows[off + i] = row[i]
+    return rows
+
+
+def adi_encode_rows(rows):
+    """Ergonomic list API: [row, ...] (equal length) -> (leads list, deltas list-of-lists). Uses the
+    C batch kernel when available (bit-for-bit == ringkit.ml.kvadi.encode), else the Python fallback."""
+    if not rows:
+        return [], []
+    dim = len(rows[0])
+    if any(len(r) != dim for r in rows):
+        raise ValueError("adi_encode_rows: all rows must have equal length")
+    R = len(rows)
+    pitch = next_prime(dim)
+    slab = bytearray(R * pitch)
+    for r in range(R):
+        off = r * pitch
+        for i in range(dim):
+            slab[off + i] = int(rows[r][i]) & 0xFF
+    leads, deltas = adi_encode_batch(slab, R, dim, pitch)
+    return list(leads), [[deltas[r * pitch + i] for i in range(dim - 1)] for r in range(R)]
+
+
+def adi_decode_rows(leads, deltas):
+    """Inverse of adi_encode_rows: (leads, deltas list-of-lists) -> [row, ...], exactly."""
+    R = len(leads)
+    if R == 0:
+        return []
+    dim = len(deltas[0]) + 1
+    pitch = next_prime(dim)
+    dslab = bytearray(R * pitch)
+    for r in range(R):
+        off = r * pitch
+        for i in range(dim - 1):
+            dslab[off + i] = int(deltas[r][i]) & 0xFF
+    rows = adi_decode_batch(bytearray(leads), dslab, R, dim, pitch)
+    return [[rows[r * pitch + i] for i in range(dim)] for r in range(R)]
+
+
+def _selftest_adi(lib):
+    """D9 gate: C batch encode/decode must equal the ringkit.ml.kvadi reference BIT-FOR-BIT."""
+    import random
+    from ringkit.ml import kvadi as ka
+    rnd = random.Random(1)
+    for dim in (1, 2, 4, 16):
+        pitch = next_prime(dim)
+        R = 7
+        rows = bytearray(rnd.randrange(256) for _ in range(R * pitch))
+        # C encode
+        leads = bytearray(R)
+        deltas = bytearray(R * pitch)
+        lib.adi_encode_batch(_u8(leads), _u8(deltas), _u8(bytearray(rows)), R, dim, pitch)
+        # Python reference per row + compare, then C decode must recover the rows exactly
+        for r in range(R):
+            off = r * pitch
+            lead, delta = ka.encode([rows[off + i] for i in range(dim)])
+            if leads[r] != lead or [deltas[off + i] for i in range(dim - 1)] != list(delta):
+                return False
+        out = bytearray(R * pitch)
+        lib.adi_decode_batch(_u8(out), _u8(leads), _u8(deltas), R, dim, pitch)
+        for r in range(R):
+            off = r * pitch
+            if [out[off + i] for i in range(dim)] != [rows[off + i] for i in range(dim)]:
                 return False
     return True

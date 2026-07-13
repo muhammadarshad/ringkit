@@ -212,10 +212,10 @@ class RingKVCache:
         qp = rope(q, pos) if self.rope else [int(x) & 0xFF for x in q]
         row = _kvhost.scores(self.K, qp, self.n, self.dim, self.pitch)   # C, zero-copy over the slab
         w, best = boltzmann_weights(row, beta)
-        V = self.values()
         if hard:
-            return list(V[best])
-        return circular_blend(V, w, best)
+            return list(self.values()[best])
+        # circular blend on the C value slab (zero-copy); Python reference if no kernel. Bit-for-bit.
+        return _kvhost.blend(self.V, w, self.n, self.dim, self.pitch, best)
 
     def nbytes(self):
         """Exact footprint of the two slabs, INCLUDING the manifold pad (honest: the prime pitch
