@@ -66,7 +66,14 @@ LM-head argmax) — SEPARATE from the pure ring `nn` so it never disturbs the na
 float-free — "The capital of France is" → "Paris."** Weights streamed via mmap (2GB onix + 1.18GB
 embed as reclaimable page cache, ~230MB resident — stream, never materialize; hpq runs 8B on an
 iPhone 13). RoPE inv_freq is geometric (r^i) with cos/sin from a ring CORDIC; LM head = argmax of
-the raw dot (soft-cap is monotone). Gemma4-12B is the same path at G4_ config (next). Our MPRC architectures (RDT/Mamba2/QuantumRoPE) → ringkit is the **operating system**
+the raw dot (soft-cap is monotone). **Gemma4-12B (docs/REPORT-GEMMA4.md): same path at G4_ config —
+faithful 48-layer forward, fox argmax ' dog' reproduced after making `gemma.proj` EXACT — the ring
+does NOT quantize the model: activations are decomposed exactly into int8 digit passes for the QSM
+table (residual re-encoded until ZERO, ≤4 passes), bit-exact to the exact integer dot. The old
+single-pass truncating grid broke under ~60× late-layer activation outliers; localize such bugs
+against INDEPENDENT refs [MLX, f64-mirror-with-exact-activations] with teacher-forced per-layer
+isolation — a self-built mirror running the SAME algorithm is circular, and hpq's f16 is NOT
+ground truth (retracted 2026-07-15: it contradicts the f64 evaluation of its own weights).** Our MPRC architectures (RDT/Mamba2/QuantumRoPE) → ringkit is the **operating system**
 (native: `nn`/`core`/`physics`/`ml`). BOTH: no float, no FPU — every FPU op is replaced by a ringkit
 QCM-enabled primitive (`qsm`/`mul`, `ract.exp_fixed`, `boltzmann_lut`, `isqrt`, shifts). Do NOT copy
 the reference kernel (hpq is the WHAT; ringkit QCM code is the HOW); never a float fallback.
@@ -144,10 +151,39 @@ Every facade object hides ring internals and exposes `.raw` for power users.
 
 ## Status
 
-All suites green (run_all, incl. test_gemma2). Substrate (core/stats/linalg/rnp/physics/ml/kernels)
-is production-grade and AST-clean. Facades (`rk.nn`, `rk.data`, `rk.physics`) built and verified
-with held-out + controls. Emulation engine: loads real .pth (RDT/Mamba2) and Gemma .onix; ring
-inference verified bit-exact / cosine 1.0 vs float; **Gemma2-2B generates real text on the ring,
-float-free (REPORT-GEMMA2.md).** Quickstart DONE. Apple backends Phases 0-1c DONE; CoreML descoped.
-Next: Gemma4-12B autoregressive (same emulation path, G4_ config: 48 layers, sliding/global attn,
-partial rotation, per-layer scalars, per-head QK norm); speed (gelu LUT to cut per-token time).
+All suites green (run_all, incl. test_gemma2 + test_gemma4). Substrate (core/stats/linalg/rnp/
+physics/ml/kernels) is production-grade and AST-clean. Facades (`rk.nn`, `rk.data`, `rk.physics`)
+built and verified with held-out + controls. Emulation engine: loads real .pth (RDT/Mamba2) and
+Gemma .onix; ring inference verified bit-exact / cosine 1.0 vs float; **Gemma2-2B generates real
+text on the ring, float-free (REPORT-GEMMA2.md); Gemma4-12B faithful forward, `gemma.proj` GEMV now
+BIT-EXACT (exact digit decomposition — no activation quantization), fox argmax ' dog'
+(REPORT-GEMMA4.md).** Quickstart DONE. Apple backends Phases 0-1c DONE; CoreML descoped.
+Speed: the Gemma4 forward is FULLY on the kit's speed model — 115 → 0.81 s/token native-arm64
+CPU → **0.36 s/token on the unified GPU (RINGKIT_GEMV=metal; 320×; 4.4× faster than hpq)**, all
+bit-for-bit gated incl. through the GPU (dual-path + mirror pins pass under metal). GPU GEMV =
+`emu_gemv` in kernels/apple/metal/emulation.metal + `rk_metal_onix_map` (the 10.9 GB onix mmap
+wrapped as a NO-COPY shared MTLBuffer — the GPU reads the file's own page-cache pages; one
+threadgroup per output row, long accumulators; CPU fallback for out-of-region tensors /
+out-of-range activations keeps bit-identity by routing). CPU rate came from narrowing bridge
+activations to int32 (exact: products ≤ 2^38; range-checked __int128 scalar fallback) so the
+u8→i32 widening MLA vectorizes (NEON smlal; Rosetta lacks AVX2 — run natively). All
+bit-for-bit gated: C-RESIDENT activations (`layer_forward_c`: the hidden vector
+lives in C buffers across all 48 layers — embed decode, rmsnorm_rows, GEMV, RoPE, KV-slab
+insert (memmove), attention, gelu_mul, residual add and layer scalar are ALL C blocks; ONE list
+crossing per token, for the LM head), fused exact GEMV reading onix slabs IN PLACE (MAP_PRIVATE
+zero-copy) in TWO GATED VARIANTS per the ring_gemm precedent — `qsm_gemv_exact_mt`
+(multiplier-free QSM digit path, silicon/reference; RINGKIT_GEMV=qsm) and `qsm_gemv_bridge_mt`
+(hardware-* exact dot, one sweep + int32 vectorizable fast path, DEFAULT for CPU dev) —
+specialised-MPP row/head splits (merge-free), C-owned KV slabs (`host.KVSlab`). The composition
+gate is in test_gemma4: C-resident forward == Python reference forward BIT-FOR-BIT across
+positions. Anchors re-verified each step (fox ' dog' 27 s e2e, Paris).
+Multi-token correctness (2026-07-15, REPORT-GEMMA4 §multi-token): ring == f64-mirror argmax on
+both tested divergence points (fox pos-9 → 107 gap 2.6; raw France → 7001 — same top-3 order,
+logits within ~0.6) and == independent MLX for 4 straight fox tokens. **hpq's "exact/lossless"
+claim is RETRACTED** — its f16 forward contradicts the f64 evaluation of its own int8 weights on
+both points; hpq = fast cross-check + architecture WHAT, never ground truth. Reference hierarchy:
+f64 mirror (exact acts, same weights) = ground truth for the onix model; MLX = independent
+architecture check; raw France stays a bad oracle (3-way split).
+Next: chat-template multi-token runs on local weights; bf16-checkpoint semantics bar DEFERRED
+(no downloads — verify against local weights only: 12B onix f64-mirror = ground truth, 2B onix,
+MLX 4-bit independent check); GPU GEMV kernel-level speed (uchar4/simdgroup reads in emu_gemv).

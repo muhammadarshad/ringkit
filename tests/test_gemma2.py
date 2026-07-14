@@ -55,33 +55,24 @@ s_row = [rng.randrange(-6, 4) for _ in range(OF)]
 z_row = [rng.randrange(1, 7) for _ in range(OF)]
 x = [rng.randrange(-3 * ONE, 3 * ONE) for _ in range(INF)]
 ring = gemma.proj((xbar, s_row, z_row, OF, INF), x, FRAC)
-# independent integer reference of the SAME math
-mx = max(abs(v) for v in x)
-a = 0
-if (127 << FRAC) >= mx:
-    while (127 << (a - 1 + FRAC)) >= mx:
-        a -= 1
-else:
-    while (127 << (a + FRAC)) < mx:
-        a += 1
-sh = FRAC + a
-def q8(v):
-    if sh > 0:
-        r = 1 << (sh - 1); q = (v + r) >> sh if v >= 0 else -((-v + r) >> sh)
-    elif sh == 0:
-        q = v
-    else:
-        q = v << (-sh)
-    return max(-127, min(127, q))
-xs = [q8(v) for v in x]
-ref = []
-for r in range(OF):
-    dot = sum((xbar[r * INF + i] - 128) * xs[i] for i in range(INF))
-    shift = a + s_row[r] + FRAC
-    acc = dot << shift if shift >= 0 else dot >> (-shift)
-    z = z_row[r] or 1
-    ref.append(-((-acc) // z) if acc < 0 else acc // z)
-check("proj bit-exact vs integer reference", ring == ref)
+# THE reference: proj's exact activation-digit decomposition must reproduce the EXACT integer dot
+# (no activation loss exists at all) — D = Σ(xbar−128)·x, then ·2^s (floor via shift), then /z.
+def ref_proj_exact(xbar_, s_row_, z_row_, inf_, x_, rows):
+    out = []
+    for r in rows:
+        D = sum((xbar_[r * inf_ + i] - 128) * x_[i] for i in range(inf_))
+        t = D << s_row_[r] if s_row_[r] >= 0 else D >> (-s_row_[r])
+        z = z_row_[r] or 1
+        out.append(-((-t) // z) if t < 0 else t // z)
+    return out
+ref = ref_proj_exact(xbar, s_row, z_row, INF, x, range(OF))
+check("proj bit-exact vs the EXACT integer dot (zero activation loss)", ring == ref)
+# tiny activations / tiny residual passes push the power-of-2 scale exponent NEGATIVE — must not
+# crash (regression: ValueError negative shift count on a Gemma2 down_proj residual) and stays exact
+x_tiny = [1, -1] + [0] * (INF - 2)
+check("proj exact on tiny activations (negative-exponent digit pass)",
+      gemma.proj((xbar, s_row, z_row, OF, INF), x_tiny, FRAC) ==
+      ref_proj_exact(xbar, s_row, z_row, INF, x_tiny, range(OF)))
 
 print("== 5. Gemma BPE tokenizer round-trip ==")
 tp = tk.default_path()
@@ -127,22 +118,8 @@ if paths:
     xb, s_row, z_row, of, inf = W.lin(0, "q_proj")
     xr = [random.Random(0).randint(-2 * ONE, 2 * ONE) for _ in range(inf)]
     ringq = gemma.proj((xb, s_row, z_row, of, inf), xr, FRAC)[:6]
-    mx = max(abs(v) for v in xr); a = 0
-    if (127 << FRAC) >= mx:
-        while (127 << (a - 1 + FRAC)) >= mx: a -= 1
-    else:
-        while (127 << (a + FRAC)) < mx: a += 1
-    sh = FRAC + a
-    xs = [max(-127, min(127, ((v + (1 << (sh - 1))) >> sh) if sh > 0 and v >= 0 else
-              (-((-v + (1 << (sh - 1))) >> sh)) if sh > 0 else (v if sh == 0 else v << (-sh)))) for v in xr]
-    refq = []
-    for r in range(6):
-        dot = sum((xb[r * inf + i] - 128) * xs[i] for i in range(inf))
-        shift = a + s_row[r] + FRAC
-        acc = dot << shift if shift >= 0 else dot >> (-shift)
-        z = z_row[r] or 1
-        refq.append(-((-acc) // z) if acc < 0 else acc // z)
-    check("real q_proj bit-exact vs integer reference", ringq == refq)
+    refq = ref_proj_exact(xb, s_row, z_row, inf, xr, range(6))
+    check("real q_proj bit-exact vs the EXACT integer dot", ringq == refq)
 
     if os.environ.get("RINGKIT_GEMMA_GEN") == "1":
         T = tk.GemmaTokenizer(tk.default_path())

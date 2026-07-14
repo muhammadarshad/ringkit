@@ -106,6 +106,11 @@ def rmsnorm_fixed(x, weight, frac, eps=1):
 
     x, weight are Q<frac> integer lists. Normalizes MAGNITUDE (energy); a ring statistic, no Euclidean
     sqrt from libm — the ring's own integer isqrt."""
+    if eps == 1:
+        from ringkit.kernels.mprc.gemma import host as _kh
+        fused = _kh.rmsnorm(x, weight, frac)     # ONE C block call, bit-for-bit gated at load (D9)
+        if fused is not None:
+            return fused
     n = len(x)
     ssq = 0
     for v in x:

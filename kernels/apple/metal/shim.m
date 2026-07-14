@@ -8,13 +8,13 @@
 #import <Foundation/Foundation.h>
 #include <string.h>
 
-#define RK_ABI 6
+#define RK_ABI 8
 
 static id<MTLDevice> g_dev = nil;
 static id<MTLCommandQueue> g_queue = nil;
 // 0 mul, 1 add, 2 sub, 3 plaquette, 4 metropolis_sweep, 5 metropolis_sweep_rng,
-// 6 gemm_mul, 7 gemm_qsm
-static id<MTLComputePipelineState> g_pso[8] = {nil};
+// 6 gemm_mul, 7 gemm_qsm, 8 emu_gemv
+static id<MTLComputePipelineState> g_pso[9] = {nil};
 static id<MTLBuffer> g_qsq = nil;           // quarter-square table q[t]=floor(t^2/4), t<=510
 
 typedef struct { unsigned int W, H, D, parity; } RKGaugeParams;
@@ -36,10 +36,10 @@ int rk_metal_init(const char *src_utf8) {
         if (!lib) return -2;
         g_queue = [g_dev newCommandQueue];
         if (!g_queue) return -3;
-        const char *names[8] = {"ring_mul", "ring_add", "ring_sub",
+        const char *names[9] = {"ring_mul", "ring_add", "ring_sub",
                                 "plaquette", "metropolis_sweep", "metropolis_sweep_rng",
-                                "gemm_mul", "gemm_qsm"};
-        for (int k = 0; k < 8; k++) {
+                                "gemm_mul", "gemm_qsm", "emu_gemv"};
+        for (int k = 0; k < 9; k++) {
             id<MTLFunction> fn = [lib newFunctionWithName:
                                   [NSString stringWithUTF8String:names[k]]];
             if (!fn) return -4;
@@ -98,6 +98,111 @@ int rk_metal_gemm(int variant, unsigned char *C, const unsigned char *A,
 
 const char *rk_metal_device_name(void) {
     return g_dev ? g_dev.name.UTF8String : "";
+}
+
+/* ── Emulation GEMV over mmapped weight files (unified memory, no-copy) ──────────────────────
+ * rk_metal_onix_map wraps a host PAGE-ALIGNED mmap as a shared MTLBuffer WITHOUT copying
+ * (newBufferWithBytesNoCopy): the GPU reads the file's own page-cache pages. `len` must be
+ * page-rounded by the caller; the caller keeps the mmap alive. Returns a slot handle (several
+ * models may be mapped at once — Gemma2 + Gemma4 onix). Per-tensor s/z rows are uploaded ONCE
+ * and cached by (slot, offset); a batch call encodes several GEMVs (q/k/v, gate/up) in one
+ * command buffer so the bus round-trip and dispatch overhead are paid once per group. */
+#define RK_ONIX_SLOTS 4
+#define RK_SZ_CACHE 1024
+static id<MTLBuffer> g_onix[RK_ONIX_SLOTS] = {nil};
+static long g_szc_slot[RK_SZ_CACHE];
+static long g_szc_off[RK_SZ_CACHE];
+static id<MTLBuffer> g_szc_s[RK_SZ_CACHE];
+static id<MTLBuffer> g_szc_z[RK_SZ_CACHE];
+static int g_szc_n = 0;
+
+long rk_metal_onix_map(void *base, long len) {
+    if (!g_dev || !base || len < 1) return -1;
+    @autoreleasepool {
+        for (long i = 0; i < RK_ONIX_SLOTS; i++) {
+            if (g_onix[i] == nil) {
+                g_onix[i] = [g_dev newBufferWithBytesNoCopy:base
+                                                     length:(NSUInteger)len
+                                                    options:MTLResourceStorageModeShared
+                                                deallocator:nil];
+                return g_onix[i] ? i : -2;
+            }
+        }
+        return -3;                                    /* table full */
+    }
+}
+
+static int _sz_cached(long slot, long off, const int *s_row, const long long *z_row, long M) {
+    for (int i = 0; i < g_szc_n; i++)
+        if (g_szc_slot[i] == slot && g_szc_off[i] == off) return i;
+    if (g_szc_n >= RK_SZ_CACHE) return -1;
+    id<MTLBuffer> bs = [g_dev newBufferWithBytes:s_row length:M * sizeof(int)
+                                         options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bz = [g_dev newBufferWithBytes:z_row length:M * sizeof(long long)
+                                         options:MTLResourceStorageModeShared];
+    if (!bs || !bz) return -1;
+    int i = g_szc_n++;
+    g_szc_slot[i] = slot; g_szc_off[i] = off; g_szc_s[i] = bs; g_szc_z[i] = bz;
+    return i;
+}
+
+typedef struct { unsigned int M, K; int frac; } RKEmuGemvParams;
+
+/* A BATCH of n GEMVs sharing one activation vector x (int32[K]): one x upload, one command
+ * buffer, n encoder passes, one wait. s/z rows are looked up in (and populated into) the
+ * per-tensor GPU cache. outs[i] receives M[i] longs. Returns 0 on success. */
+int rk_metal_emu_gemv_batch(long slot, long n, const long *xbar_off, const long *Ms, long K,
+                            const int *x, const int *const *s_rows,
+                            const long long *const *z_rows, int frac, long long *const *outs) {
+    if (!g_pso[8] || slot < 0 || slot >= RK_ONIX_SLOTS || !g_onix[slot] || n < 1 || K < 1)
+        return -1;
+    @autoreleasepool {
+        id<MTLBuffer> bx = [g_dev newBufferWithBytes:x length:K * sizeof(int)
+                                             options:MTLResourceStorageModeShared];
+        if (!bx) return -2;
+        id<MTLBuffer> bo[16];
+        int szi[16];
+        if (n > 16) return -1;
+        for (long i = 0; i < n; i++) {
+            szi[i] = _sz_cached(slot, xbar_off[i], s_rows[i], z_rows[i], Ms[i]);
+            if (szi[i] < 0) return -2;
+            bo[i] = [g_dev newBufferWithLength:Ms[i] * sizeof(long long)
+                                       options:MTLResourceStorageModeShared];
+            if (!bo[i]) return -2;
+        }
+        id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+        for (long i = 0; i < n; i++) {
+            RKEmuGemvParams p = {(unsigned int)Ms[i], (unsigned int)K, frac};
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:g_pso[8]];
+            [enc setBuffer:bo[i] offset:0 atIndex:0];
+            [enc setBuffer:g_onix[slot] offset:(NSUInteger)xbar_off[i] atIndex:1];
+            [enc setBuffer:bx offset:0 atIndex:2];
+            [enc setBuffer:g_szc_s[szi[i]] offset:0 atIndex:3];
+            [enc setBuffer:g_szc_z[szi[i]] offset:0 atIndex:4];
+            [enc setBytes:&p length:sizeof(p) atIndex:5];
+            [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)Ms[i], 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            [enc endEncoding];
+        }
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.status != MTLCommandBufferStatusCompleted) return -3;
+        for (long i = 0; i < n; i++)
+            memcpy(outs[i], bo[i].contents, (size_t)(Ms[i] * sizeof(long long)));
+        return 0;
+    }
+}
+
+/* Single GEMV = batch of one. */
+int rk_metal_emu_gemv(long slot, long xbar_off, long M, long K, const int *x,
+                      const int *s_row, const long *z_row, int frac, long long *out) {
+    const int *ss[1] = {s_row};
+    const long long *zz[1] = {(const long long *)z_row};
+    long long *oo[1] = {out};
+    long offs[1] = {xbar_off};
+    long ms[1] = {M};
+    return rk_metal_emu_gemv_batch(slot, 1, offs, ms, K, x, ss, zz, frac, oo);
 }
 
 // op: 0 = mul, 1 = add, 2 = sub. Returns 0 on success.

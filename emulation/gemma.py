@@ -117,29 +117,28 @@ def apply_rope(vec, cos_row, sin_row, frac=FRAC):
     return out
 
 
-def proj(tensor, x, frac=FRAC):
-    """Gemma linear over an ONIX int8 tensor with power-of-2 activation quant, faithful dequant:
-       out = dot(xbar-128, x_s8) * act_scale * 2^s_row / z_row, act_scale = 2^a a power of two.
-    Everything is a shift or an integer divide; the dot runs on the energy-QSM kernel. Float-free.
-    `tensor` = (xbar, s_row, z_row, out_feat, in_feat)."""
-    xbar, s_row, z_row, of, inf = tensor
-    # max |x|
+def _act_q8(x, frac=FRAC):
+    """One int8 digit pass of the exact activation decomposition (see proj): x_i ≈ xs_i·2^(frac+a),
+    xs in [-127,127], rounding residual |x_i − xs_i·2^(frac+a)| ≤ 2^(frac+a−1) with NO clipping.
+    a = ceil(log2(max|x_real|/127)) with x_real = mx/2^frac. Returns (xs, a); (None, 0) if x = 0."""
     mx = 0
     for v in x:
         av = -v if v < 0 else v
         if av > mx:
             mx = av
     if mx == 0:
-        return [0] * of
-    # a = ceil(log2(max|x_real| / 127)) with x_real = mx/2^frac  ->  smallest a: 127<<(a+frac) >= mx
-    a = 0
-    if (127 << frac) >= mx:
-        while (127 << (a - 1 + frac)) >= mx:
+        return None, 0
+
+    def _ge(e):                         # 127·2^e >= mx; e may go negative on tiny residual passes
+        return ((127 << e) if e >= 0 else (127 >> -e)) >= mx      # exact for integer mx
+    a = 0                               # smallest a: 127·2^(a+frac) >= mx
+    if _ge(frac):
+        while _ge(a - 1 + frac):
             a = a - 1
     else:
-        while (127 << (a + frac)) < mx:
+        while not _ge(a + frac):
             a = a + 1
-    sh = frac + a                       # x_s8[i] = round(x_i / 2^sh), clamp [-127,127]
+    sh = frac + a                       # xs[i] = round(x_i / 2^sh), clamp [-127,127]
     xs = []
     for v in x:
         if sh > 0:
@@ -154,13 +153,46 @@ def proj(tensor, x, frac=FRAC):
         elif q < -127:
             q = -127
         xs.append(q)
-    dots = _k.qsm_dot(xbar, xs, of, inf)          # int64 energy dots (kernel), no fold
+    return xs, a
+
+
+def proj(tensor, x, frac=FRAC):
+    """Gemma linear over an ONIX int8 tensor. The Q<frac> activation vector is decomposed EXACTLY
+    into power-of-2-scaled int8 digit passes (the residual is re-encoded until it is ZERO — each
+    pass peels ≥7 bits, so Q16 terminates in ≤3-4 passes), one energy-QSM dot per pass:
+       out = [Σ_p dot(xbar-128, xs_p)·2^(a_p−a_min)] · 2^(a_min+s_row+frac) / z_row.
+    This is NOT activation quantization — the ring replaces the FPU, it does not quantize the
+    model: the result is BIT-EXACT to the exact integer dot Σ(xbar−128)·x scaled by 2^s/z. (The
+    single-pass truncating grid this replaces destroyed the projection DIRECTION under ~60×
+    late-layer activation outliers — Gemma4 L41 K cos 0.55 vs the exact dot.) Everything is a
+    shift or an integer divide; the dots run on the energy-QSM kernel. Float-free.
+    `tensor` = (xbar, s_row, z_row, out_feat, in_feat)."""
+    xbar, s_row, z_row, of, inf = tensor
+    fused = _k.gemv_exact(xbar, x, of, inf, s_row, z_row, frac)   # ONE C block call, zero-copy slab
+    if fused is not None:                         # bit-for-bit gated at kernel load (D9)
+        return fused
+    passes = []                                   # [(dots, a)] — one QSM dot per exact digit pass
+    r = x
+    while True:
+        xs, a = _act_q8(r, frac)
+        if xs is None:                            # residual is zero — decomposition complete
+            break
+        passes.append((_k.qsm_dot(xbar, xs, of, inf), a))
+        sh = frac + a
+        if sh <= 0:                               # this pass was a pure left shift — already exact
+            break
+        r = [v - (q << sh) for v, q in zip(r, xs)]  # |r_i| ≤ 2^(sh-1): no clipping by construction
+    if not passes:
+        return [0] * of
+    a_min = min(a for _, a in passes)
     out = []
-    for r in range(of):
-        acc = dots[r]
-        shift = a + s_row[r] + frac               # out_Qfrac = acc * 2^(a+s) / z * 2^frac
+    for row in range(of):
+        acc = 0
+        for dots, a in passes:                    # exact: Σ dots·2^(a−a_min) = dot(W,x)·2^(−frac−a_min)
+            acc += dots[row] << (a - a_min)
+        shift = a_min + s_row[row] + frac         # out_Qfrac = dot·2^(a_min+s)/z · 2^frac
         acc = acc << shift if shift >= 0 else acc >> (-shift)
-        z = z_row[r] if z_row[r] else 1
+        z = z_row[row] if z_row[row] else 1
         out.append(_sd(acc, z))
     return out
 

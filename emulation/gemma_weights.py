@@ -21,8 +21,14 @@ class Gemma2Weights:
     def __init__(self, onix_path, embed_path, norms_path):
         self.onix_path = onix_path
         self._data_off, self._ents = onix.index(onix_path)
-        self._of = open(onix_path, "rb")     # shared, read-only mmap (reclaimable page cache, not RAM-resident)
-        self._onix = mmap.mmap(self._of.fileno(), 0, prot=mmap.PROT_READ)
+        self._of = open(onix_path, "rb")     # mmap'd once (reclaimable page cache, not RAM-resident).
+        # MAP_PRIVATE (copy-on-write, never written): writable-typed buffer so the GEMV block
+        # kernel reads tensor slabs IN PLACE via zero-copy memoryviews (C-owned-block model).
+        self._onix = mmap.mmap(self._of.fileno(), 0, flags=mmap.MAP_PRIVATE)
+        self._onix_mv = memoryview(self._onix)
+        if os.environ.get("RINGKIT_GEMV") == "metal":     # GPU GEMV: map the onix once (no-copy)
+            from ringkit.kernels.mprc.gemma import host as _gh
+            _gh.metal_register_onix(self._onix)
         self._sz_cache = {}                  # cache only the tiny s_row/z_row per tensor; slice xbar on demand
         # embed.bin mmap (read-only)
         self._ef = open(embed_path, "rb")
@@ -38,7 +44,7 @@ class Gemma2Weights:
         e = self._ents[full]
         of, inf, xl, sl = e["out_feat"], e["in_feat"], e["xbar_len"], e["s_len"]
         base = self._data_off + e["offset"]
-        xbar = self._onix[base:base + of * inf]          # transient bytes slice (one tensor, freed after use)
+        xbar = self._onix_mv[base:base + of * inf]       # zero-copy view — C reads the slab in place
         sz = self._sz_cache.get(full)
         if sz is None:
             s_raw = self._onix[base + xl:base + xl + of]
@@ -95,6 +101,7 @@ class Gemma2Weights:
             if self._embw is not None:
                 self._embw.close()
             self._ef.close()
+            self._onix_mv.release()          # release the exported view before closing the mmap
             self._onix.close()
             self._of.close()
         except Exception:

@@ -14,11 +14,11 @@ import platform
 import subprocess
 from ringkit.kernels.backend import _arch_flags, _BUILD, so_path
 
-_ABI = 6
+_ABI = 8
 _DIR = os.path.dirname(__file__)
 _SHIM_C = os.path.join(_DIR, "shim.m")
 _METAL_SRCS = (os.path.join(_DIR, "ring_ops.metal"), os.path.join(_DIR, "gauge.metal"),
-               os.path.join(_DIR, "gemm.metal"))
+               os.path.join(_DIR, "gemm.metal"), os.path.join(_DIR, "emulation.metal"))
 _SO = so_path("metal_shim")
 _U8 = ctypes.POINTER(ctypes.c_uint8)
 _OPS = {"ring_mul": 0, "ring_add": 1, "ring_sub": 2}
@@ -91,6 +91,22 @@ def _load():
         lib.rk_metal_session_free.argtypes = [ctypes.c_long]
         lib.rk_metal_session_free.restype = ctypes.c_int
         lib.rk_metal_device_name.restype = ctypes.c_char_p
+        lib.rk_metal_onix_map.argtypes = [ctypes.c_void_p, ctypes.c_long]
+        lib.rk_metal_onix_map.restype = ctypes.c_long
+        lib.rk_metal_emu_gemv.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_long,
+                                          ctypes.c_long, ctypes.POINTER(ctypes.c_int32),
+                                          ctypes.POINTER(ctypes.c_int32),
+                                          ctypes.POINTER(ctypes.c_int64), ctypes.c_int,
+                                          ctypes.POINTER(ctypes.c_int64)]
+        lib.rk_metal_emu_gemv.restype = ctypes.c_int
+        lib.rk_metal_emu_gemv_batch.argtypes = [ctypes.c_long, ctypes.c_long,
+                                                ctypes.POINTER(ctypes.c_long),
+                                                ctypes.POINTER(ctypes.c_long), ctypes.c_long,
+                                                ctypes.POINTER(ctypes.c_int32),
+                                                ctypes.POINTER(ctypes.c_void_p),
+                                                ctypes.POINTER(ctypes.c_void_p), ctypes.c_int,
+                                                ctypes.POINTER(ctypes.c_void_p)]
+        lib.rk_metal_emu_gemv_batch.restype = ctypes.c_int
         src = b"\n".join(open(p, "rb").read() for p in _METAL_SRCS)
         if lib.rk_metal_init(src) != 0:
             return None
@@ -194,6 +210,41 @@ class GaugeSession:
             self.close()
         except Exception:
             pass
+
+
+def onix_map(base_addr, length):
+    """Wrap a host page-aligned mmap as a no-copy shared MTLBuffer (unified memory — the GPU
+    reads the file's own page-cache pages). length is page-rounded here. Caller must keep the
+    mmap alive. Returns a slot handle >= 0, or negative on failure."""
+    lib = _load()
+    if lib is None:
+        return -1
+    page = os.sysconf("SC_PAGE_SIZE")
+    return lib.rk_metal_onix_map(ctypes.c_void_p(base_addr), (length + page - 1) // page * page)
+
+
+def emu_gemv(slot, xbar_off, M, K, x32, s32, z64, frac, out64):
+    """Exact-int GEMV on the GPU over mapped file `slot` at byte offset xbar_off. Buffers are
+    ctypes arrays (int32 x/s, int64 z/out). Returns 0 on success (caller falls back on nonzero)."""
+    lib = _load()
+    if lib is None:
+        return -1
+    return lib.rk_metal_emu_gemv(slot, xbar_off, M, K, x32, s32, z64, frac, out64)
+
+
+def emu_gemv_batch(slot, offs, Ms, K, x32, s_arrs, z_arrs, frac, out_bufs):
+    """A batch of GEMVs sharing one activation vector: one upload, one command buffer, one wait.
+    s/z rows are cached GPU-side per tensor after the first call. Returns 0 on success."""
+    lib = _load()
+    if lib is None:
+        return -1
+    n = len(offs)
+    offs_a = (ctypes.c_long * n)(*offs)
+    ms_a = (ctypes.c_long * n)(*Ms)
+    s_p = (ctypes.c_void_p * n)(*[ctypes.cast(a, ctypes.c_void_p) for a in s_arrs])
+    z_p = (ctypes.c_void_p * n)(*[ctypes.cast(a, ctypes.c_void_p) for a in z_arrs])
+    o_p = (ctypes.c_void_p * n)(*[ctypes.cast(b, ctypes.c_void_p) for b in out_bufs])
+    return lib.rk_metal_emu_gemv_batch(slot, n, offs_a, ms_a, K, x32, s_p, z_p, frac, o_p)
 
 
 GEMM_VARIANTS = {"mul": 0, "qsm": 1}

@@ -20,10 +20,11 @@ Verified bit-for-bit reversible over random rows of every dimension 1..128. It i
 and differentiable (`delta` is the discrete derivative). The 2-D case `(x, y) -> (x+y, x-y)` the
 worked example used is just N=2; nothing here is pinned to x and y.
 
-COMPRESSION IS NOT INVENTED HERE (D2/D11). Which part of the ADI form is redundant, and by how much,
-is the "4-diffusion over the four 64-chunks" form the design marks STILL OPEN. This module ships only
-the EXACT lossless element; a compressor is a separate, measured step — and by CHARTER C9 it may
-never quantize the arc/identity to chase a bit-count.
+COMPRESSION IS NOT INVENTED HERE (D2/D11). This module ships only the EXACT lossless element; the
+compressor is the separate, measured step it always called for — `ringkit.ml.adicodec` (cascaded
+ADI + constant-column elision + zigzag bit-pack), a BIJECTIVE byte codec (decode∘encode = id,
+bit-for-bit), never a quantizer of the arc/identity (CHARTER C9). Measured 2.13× lossless on the
+real Laplacian cube; multiplier-free.
 
 Multiplier-free. No numpy, no math, no floats. No Euclidean. No fixed dimensionality.
 """
