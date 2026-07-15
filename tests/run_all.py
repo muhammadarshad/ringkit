@@ -7,7 +7,7 @@ MODULES = [
     "test_tensor", "test_rnp", "test_rmath", "test_physics", "test_ml", "test_tensor_autograd",
     "test_attention", "test_kvcache", "test_kvadi", "test_adicodec", "test_nn_facade", "test_stacked",
     "test_rlearn", "test_checkpoint", "test_infer", "test_ract", "test_infer_block",
-    "test_rdt_e2e", "test_onix", "test_gemma2", "test_gemma4", "test_data_facade",
+    "test_rdt_e2e", "test_quanta", "test_onix", "test_gemma2", "test_gemma4", "test_data_facade",
     "test_physics_facade", "test_kernels", "test_gemm", "test_gauge", "test_metal",
 ]
 

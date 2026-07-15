@@ -286,7 +286,8 @@ void gelu_mul_block(int64_t * restrict out, const int64_t * restrict g,
 static uint64_t isqrt_c(unsigned __int128 m) {                /* == rn.isqrt, digit-by-digit */
     if (m == 0) return 0;
     unsigned __int128 x = 0, c = 1;
-    while ((c << 2) <= m) c <<= 2;
+    while (c <= (m >> 2)) c <<= 2;    /* wrap-proof: (c << 2) <= m overflows to 0 for m >= 2^126
+                                       * and spins forever; shifting m down instead cannot wrap */
     while (c != 0) {
         if (m >= x + c) { m -= x + c; x = (x >> 1) + c; }
         else x >>= 1;
@@ -298,10 +299,13 @@ static uint64_t isqrt_c(unsigned __int128 m) {                /* == rn.isqrt, di
 /* RMSNorm block: x / isqrt(mean(x²)+eps) · w, all Q<frac> — == ract.rmsnorm_fixed. */
 void rmsnorm_block(int64_t * restrict out, const int64_t * restrict x,
                    const int64_t * restrict w, long n, int frac, int64_t eps) {
-    int64_t ssq = 0;
+    __int128 ssq = 0;                                         /* int64 wrapped on huge-but-legit
+                                                               * Q<frac> activations (|x| ~ 2^45,
+                                                               * Soliton y_prenorm); exact to |x|
+                                                               * < 2^58 at n <= 2^7 — host guards */
     for (long i = 0; i < n; i++)
-        ssq += (int64_t)(((__int128)x[i] * x[i]) >> frac);    /* per-element shift, then sum */
-    int64_t ms = ssq / n + eps;                               /* ssq >= 0: floor == trunc */
+        ssq += ((__int128)x[i] * x[i]) >> frac;               /* per-element shift, then sum */
+    __int128 ms = ssq / n + eps;                              /* ssq >= 0: floor == trunc */
     int64_t rms = (int64_t)isqrt_c((unsigned __int128)ms << frac);
     if (rms == 0) rms = 1;
     const int64_t one = (int64_t)1 << frac;

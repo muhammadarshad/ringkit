@@ -52,8 +52,17 @@ def exp_fixed(x, frac):
 
 
 def sigmoid_fixed(x, frac):
-    """1/(1+e^-x) in Q<frac>. A (0,1) volume-knob; float-free."""
+    """1/(1+e^-x) in Q<frac>. A (0,1) volume-knob; float-free.
+
+    |x| is saturated at frac·2^frac — EXACT: beyond it e^-|x| floors to 0 in Q<frac>
+    (e^frac > 2^frac since ln2 < 1), so the output is already pinned at 0/one; the clamp only
+    prevents exp_fixed from squaring astronomically wide bigints on huge (buggy/outlier) args."""
     one = 1 << frac
+    lim = frac << frac
+    if x > lim:
+        x = lim
+    elif x < -lim:
+        x = -lim
     e = exp_fixed(-x, frac)                      # e^-x
     return rn.mf_floordiv(1 << (frac + frac), one + e)   # one / (1 + e^-x)
 

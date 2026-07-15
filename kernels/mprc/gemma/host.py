@@ -251,11 +251,16 @@ def gelu_mul(g, u, frac):
 
 
 def rmsnorm(x, weight, frac, eps=1):
-    """RMSNorm block (== ract.rmsnorm_fixed bit-for-bit). None when the kernel is unavailable."""
+    """RMSNorm block (== ract.rmsnorm_fixed bit-for-bit). None when the kernel is unavailable
+    or an activation exceeds the kernel's exact __int128 Σx² range (caller falls back to the
+    Python bigint reference — same result, just slower)."""
     lib = _load()
     if lib is None:
         return None
     n = len(x)
+    for v in x:
+        if (v >> 58) if v >= 0 else ((-v) >> 58):
+            return None
     xa = (ctypes.c_int64 * n)(*x)
     wa = (ctypes.c_int64 * n)(*weight)
     out = (ctypes.c_int64 * n)()
@@ -525,9 +530,13 @@ def _selftest_act(lib):
     lib.gelu_mul_block(out, ga, ua, len(g), frac)
     if list(out) != want:
         return False
-    # rmsnorm: normal + outlier vector, weighted and no-scale
+    # rmsnorm: normal + outlier vector, weighted and no-scale — plus the huge-activation regime
+    # (|x| ~ 2^45..2^55, Soliton y_prenorm) whose Σx² overflowed the old int64 accumulator and
+    # whose wrapped-negative mean-square hung the old isqrt_c loop
     for xs in ([rnd.randrange(-2 * ONE, 2 * ONE) for _ in range(33)],
                [rnd.randrange(-ONE >> 2, ONE >> 2) for _ in range(40)] + [60 * ONE],
+               [rnd.randrange(-(1 << 55), 1 << 55) for _ in range(128)],
+               [rnd.randrange(-(1 << 46), 1 << 46) for _ in range(128)],
                [0] * 17):
         for w in ([rnd.randrange(-ONE, 2 * ONE) for _ in range(len(xs))], [ONE] * len(xs)):
             want = ract.rmsnorm_fixed(xs, w, frac)

@@ -143,6 +143,15 @@ ringkit/nn/          FACADE (top-level pkg): layers.py (Layer, Linear, Dense, Se
 ringkit/rmath.py     stdlib-math REPLACEMENT (original name, D10): math-shaped handles (sin/cos/exp/
                      log/isqrt, tau/pi/e with e = RING_E = 3) re-exported from core — no behavior of its own
 ringkit/data.py      FACADE: encode/encode_range, one_hot, split, batches
+ringkit/quanta/      the MPRC architectures as ring-native float-free forwards (D10 name — NOT
+                     "transformers"): _ringtrig (integer _arch tables), frontend (shared QCM
+                     quadrant+vacuum front-end), layers (QK-normed QuantumRoPE encoder block),
+                     ssd (Mamba2 SSD gate_lat2d: softplus_fixed, toroidal lattice diffusion,
+                     5-arm ADI gate), models (rotor/gluon/soliton_forward). Rotor (MPRCRDT) gated
+                     cosine 1.000000; Soliton (MPRCMamba2) gated cosine 0.999965 + argmax vs the
+                     numpy oracle on real checkpoints; Gluon (MPRCViT) written, awaits a .pth.
+                     Linears auto-route through the gated C GEMV (emulation/infer.linear digit-
+                     plane path). AST-guarded float-free in test_quanta.
 ```
 
 Engineer entrypoint: `import ringkit as rk` → `rk.nn`, `rk.data`, `rk.physics.Gauge`, `rk.rnp`
@@ -151,7 +160,13 @@ Every facade object hides ring internals and exposes `.raw` for power users.
 
 ## Status
 
-All suites green (run_all, incl. test_gemma2 + test_gemma4). Substrate (core/stats/linalg/rnp/
+All suites green (run_all, incl. test_gemma2 + test_gemma4 + test_quanta), Rosetta dev AND native
+arm64. **quanta (2026-07-15): Rotor + Soliton SHIPPED and gated** — `infer.linear` routes ≥2^12-MAC
+tensors through the gated C GEMV via balanced base-256 weight digit-planes (bit-identical, ~385×;
+Soliton e2e 0.72 s), and the Soliton "exit 137" was a C `rmsnorm_block` int64 Σx² overflow →
+`isqrt_c` infinite loop on legit ~2^45 Q16 activations (fixed: __int128 + wrap-proof isqrt +
+host range-guard + selftest magnitude regimes; sigmoid/softmax/softplus got EXACT frac·2^frac
+saturations — provably bit-identical, no more huge-arg bigint blowups). Substrate (core/stats/linalg/rnp/
 physics/ml/kernels) is production-grade and AST-clean. Facades (`rk.nn`, `rk.data`, `rk.physics`)
 built and verified with held-out + controls. Emulation engine: loads real .pth (RDT/Mamba2) and
 Gemma .onix; ring inference verified bit-exact / cosine 1.0 vs float; **Gemma2-2B generates real
