@@ -53,6 +53,25 @@
 > CAVEAT (small-grid vlm Rotor gate only): its oracle+ring share the sigmoid-GELU form while the
 > real vlm layer uses exact-erf GELU — self-consistent, unanchored on that axis; the APP-scale
 > rotor gate IS erf-anchored. Anchor the vlm gate against its torch model when it next matters.
+>
+> ## WHAT'S LEFT (open ledger as of 2026-07-15 end of session)
+>
+> 1. **Gluon (MPRCViT)** — forward written (`gluon_forward`), NO checkpoint exists anywhere
+>    (all HF repos + local searched). Gate it the moment the owner exports a .pth; use the
+>    torch-anchor chain in `bench/webapp_e2e/`, not a hand-written oracle alone.
+> 2. **Webapp parity is CLASSIFIER-only.** The ring reproduces the app's cls paths (rotor ∥
+>    soliton ∥ fused). The app's OCR read-text and barcode heads (`QCMOCR` decoder — a
+>    cross-attention decoder over the shared encoder memory) and the SPEC-017 gates
+>    (reject/gallery-kNN/intent) are NOT emulated. Next natural quanta target: `QCMOCR`.
+> 3. **vlm Rotor small-grid gate** — anchor against the real torch `vlm_rdt_best` forward
+>    (erf-GELU axis, see CAVEAT above). Half a day with the existing recipe.
+> 4. **quanta app-scale test cost** — the APP-E2E section adds ~2.5 min to test_quanta (ring
+>    rotor ~100 s, soliton ~57 s). If run_all time starts to hurt: C-block the radius-1 window
+>    attention and the toroidal diffusion (both are trivial slab kernels; the D9 selftest
+>    pattern is established). Not blocking today.
+> 5. **Gemma path (pre-existing, unchanged):** chat-template multi-token runs on local weights;
+>    bf16-checkpoint semantics bar DEFERRED (local weights only); GPU GEMV kernel-level speed
+>    (uchar4/simdgroup reads in `emu_gemv`).
 
 ## The task
 
