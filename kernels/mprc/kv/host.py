@@ -73,9 +73,8 @@ def _load():
     _tried = True
     try:
         lib = ctypes.CDLL(_build())
-        for fn in (lib.kv_scores, lib.kv_scores_walk):
-            fn.argtypes = [_LONG, _U8, _U8, ctypes.c_long, ctypes.c_long, ctypes.c_long]
-            fn.restype = None
+        lib.kv_scores.argtypes = [_LONG, _U8, _U8, ctypes.c_long, ctypes.c_long, ctypes.c_long]
+        lib.kv_scores.restype = None
         lib.kv_argmax.argtypes = [_U8, _U8, ctypes.c_long, ctypes.c_long, ctypes.c_long, _LONG]
         lib.kv_argmax.restype = ctypes.c_long
         lib.kv_blend.argtypes = [_U8, _U8, _LONG, ctypes.c_long, ctypes.c_long, ctypes.c_long, ctypes.c_long]
@@ -112,17 +111,17 @@ def py_scores(K, q, n, dim, pitch):
     return out
 
 
-def scores(K, q, n, dim, pitch, walk=False):
+def scores(K, q, n, dim, pitch):
     """score[j] = -sum_d ring_distance(q[d], K[j][d]) over the prime-pitched slab. C when available.
 
-    walk=True traverses tokens by the stride-7 QCM quantum walk instead of sequentially."""
+    Sequential traversal only: the stride-7 walk variant measured ~2% slower (identical scores)
+    and was removed — commit 5f755df holds the measurement."""
     lib = _load()
     if lib is None:
         return py_scores(K, q, n, dim, pitch)
     out = (ctypes.c_long * n)()
     qb = bytearray(q)
-    fn = lib.kv_scores_walk if walk else lib.kv_scores
-    fn(out, _u8(K), _u8(qb), n, dim, pitch)
+    lib.kv_scores(out, _u8(K), _u8(qb), n, dim, pitch)
     return list(out)
 
 
@@ -166,12 +165,10 @@ def _selftest(lib):
             K = bytearray(rnd.randrange(256) for _ in range(n * pitch))
             q = bytearray(rnd.randrange(256) for _ in range(dim))
             want = py_scores(K, q, n, dim, pitch)
-            for walk in (False, True):
-                out = (ctypes.c_long * n)()
-                fn = lib.kv_scores_walk if walk else lib.kv_scores
-                fn(out, _u8(K), _u8(q), n, dim, pitch)
-                if list(out) != want:          # the WALK must produce the SAME scores (bijection)
-                    return False
+            out = (ctypes.c_long * n)()
+            lib.kv_scores(out, _u8(K), _u8(q), n, dim, pitch)
+            if list(out) != want:
+                return False
             b = ctypes.c_long(0)
             j = lib.kv_argmax(_u8(K), _u8(q), n, dim, pitch, ctypes.byref(b))
             wj = max(range(n), key=lambda i: want[i])
