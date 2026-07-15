@@ -125,9 +125,9 @@ def softmax(scores, frac):
         if s > m:
             m = s
     lim = frac << frac                             # exact saturation: for s-m <= -frac·2^frac the
-    exps = [ract.exp_fixed(s - m if s - m > -lim else -lim, frac)   # reciprocal exp floors to 0
-            for s in scores]                       # anyway (e^frac > 2^frac), so bit-identical —
-                                                   # and the huge-arg bigint blowup never happens
+    args = [s - m if s - m > -lim else -lim for s in scores]        # reciprocal exp floors to 0
+    exps = ract.exp_list_nonpos(args, frac)        # anyway (e^frac > 2^frac), so bit-identical —
+                                                   # one C block call; huge-arg blowup never happens
     z = 0
     for e in exps:
         z += e

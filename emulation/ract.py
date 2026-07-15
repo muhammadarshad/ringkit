@@ -67,6 +67,25 @@ def sigmoid_fixed(x, frac):
     return rn.mf_floordiv(1 << (frac + frac), one + e)   # one / (1 + e^-x)
 
 
+def sigmoid_list(xs, frac):
+    """sigmoid_fixed over a whole vector in ONE C block call (bit-for-bit; D9), python fallback."""
+    from ringkit.kernels.mprc.gemma import host as _kh
+    fused = _kh.sigmoid_vec(xs, frac)
+    if fused is not None:
+        return fused
+    return [sigmoid_fixed(v, frac) for v in xs]
+
+
+def exp_list_nonpos(xs, frac):
+    """exp_fixed over a vector of NON-POSITIVE args (the softmax domain) in ONE C block call
+    (bit-for-bit there; D9), python fallback."""
+    from ringkit.kernels.mprc.gemma import host as _kh
+    fused = _kh.exp_vec(xs, frac)
+    if fused is not None:
+        return fused
+    return [exp_fixed(v, frac) for v in xs]
+
+
 def gelu_fixed(x, frac):
     """GELU(x) ≈ x · sigmoid(1.702 x) in Q<frac>. Float-free (1.702 = 1702/1000)."""
     arg = _sdiv(rn.mul(_C_GELU, x), _MILLE)      # 1.702 * x

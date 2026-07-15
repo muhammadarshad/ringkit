@@ -283,6 +283,21 @@ void gelu_mul_block(int64_t * restrict out, const int64_t * restrict g,
         out[i] = (int64_t)(((__int128)gelu_tanh_c(g[i], frac) * u[i]) >> frac);
 }
 
+/* Elementwise sigmoid block — == ract.sigmoid_fixed for EVERY input (the divisor saturation is
+ * exactly the Python clamp's fixed point on both tails). One call gates a whole token batch. */
+void sigmoid_block(int64_t * restrict out, const int64_t * restrict x, long n, int frac) {
+    for (long i = 0; i < n; i++)
+        out[i] = sigmoid_fixed_c(x[i], frac);
+}
+
+/* Elementwise exp block — == ract.exp_fixed on the softmax domain x <= 0 (where e^x is a
+ * PURE DIVISOR result <= one, so the saturation equivalence holds; positive args would need
+ * Python's arbitrary-precision growth and are the caller's job to exclude). */
+void exp_block(int64_t * restrict out, const int64_t * restrict x, long n, int frac) {
+    for (long i = 0; i < n; i++)
+        out[i] = exp_fixed_c(x[i], frac);
+}
+
 static uint64_t isqrt_c(unsigned __int128 m) {                /* == rn.isqrt, digit-by-digit */
     if (m == 0) return 0;
     unsigned __int128 x = 0, c = 1;

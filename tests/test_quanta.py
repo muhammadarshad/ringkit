@@ -142,7 +142,13 @@ if MPATH is not None:
     dstep = [-1 if hh < NH2//2 else min(16, 1 << (hh-NH2//2)) for hh in range(NH2)]
     def spo(x): return np.log1p(np.exp(-np.abs(x))) + np.maximum(x, 0)
     def rho(y, gg): return y / np.sqrt((y*y).mean(-1, keepdims=True) + 1e-5) * gg
-    def rh8(v): return np.concatenate([-v[...,2:4], v[...,:2], -v[...,6:8], v[...,4:6]], -1)
+    def rh8(v):
+        # QuantumRoPE4D rotate-half at hd=8: FOUR 2-dim ADI chunks, each (-x1, x0) — the
+        # DEPLOYED convention, anchored against the real torch forward (webapp e2e section).
+        o = np.empty_like(v)
+        o[..., 0::2] = -v[..., 1::2]
+        o[..., 1::2] = v[..., 0::2]
+        return o
     def latt(sh):
         out=[None]*NH2; gs=[sh[hh].sum(0) for hh in range(NH2)]
         for hh in range(NH2):
@@ -182,6 +188,212 @@ if MPATH is not None:
     check("Soliton argmax class matches oracle", int(logits_r.argmax()) == int(logits_o.argmax()))
 else:
     print("  (no Mamba2 checkpoint reachable — Soliton gate skipped)")
+
+# ==================== WEBAPP E2E — the COMPLETE test ====================
+# The deployed vlm-transformers webapp (app/serve.py) is the real product: image -> 16-channel
+# wave cube (113x128) -> Rotor (RDT + LatticeAttention + cls head) and Soliton (Mamba2 HF export)
+# -> fused prediction. Here the SAME deterministic real-regime frame (vacuum padding rows +
+# saturated 255s, the regimes a random grid never exercises) runs through an inline numpy oracle
+# of the app forward — VALIDATED against the actual torch app to fp32 precision (maxerr ~2e-5,
+# scratchpad/app_e2e_anchor.py + app_e2e_oracle.py, 2026-07-15; incl. the real shelf photo) —
+# and through the ring quanta package at the app's true scale (D=16, H=113, N=1808 tokens).
+import glob as _glob
+RAPP = next(iter(_glob.glob(os.path.expanduser(
+    "~/.cache/huggingface/hub/models--marshadbits--qcm-rp2k-cloud-matched-results/"
+    "snapshots/*/heads_rdt_L2_k2384_best.pth"))), None)
+if MPATH is None:
+    print("  (no Mamba2 checkpoint — webapp e2e skipped)")
+else:
+    import time as _time
+    Da, Ha, Na = 16, 113, 16 * 113
+    ERF = np.vectorize(math.erf)
+
+    # -- the app's wave encode (app/serve.py, numpy verbatim = labeled oracle) on a synthetic
+    #    real-regime frame --
+    def synth_frame():
+        a = np.zeros((113, 128, 3), np.uint16)
+        a[10:103, :, :] = (250, 250, 250)
+        a[20:80, 8:56] = (180, 20, 15); a[30:52, 16:48] = (255, 255, 255)
+        a[24:92, 64:120] = (20, 60, 160); a[40:58, 72:112] = (255, 215, 0)
+        a[10:14, :, :] = (0, 0, 0)
+        for i in range(6):
+            a[34:48, 18 + 5 * i] = (10, 10, 10)
+        return a
+
+    def wave_encode(arr):
+        MOD7 = (np.arange(256) % 7).astype(np.uint8)
+        def evolve(m, steps):
+            cur = m.astype(np.uint16)
+            for _ in range(steps):
+                nxt = cur.copy()
+                up, dn = cur[:-2, 1:-1], cur[2:, 1:-1]
+                lf, rt = cur[1:-1, :-2], cur[1:-1, 2:]
+                c = cur[1:-1, 1:-1]
+                nxt[1:-1, 1:-1] = (up + dn + lf + rt + (c << 2)) >> 3
+                cur = nxt
+            return cur.astype(np.uint8)
+        def plaq(m):
+            M = m.astype(np.uint16)
+            up, dn = M[:-2, 1:-1], M[2:, 1:-1]
+            lf, rt = M[1:-1, :-2], M[1:-1, 2:]
+            f = (rt + up + 512 - lf - dn + 128) & 0xFF
+            out = np.full(m.shape, 128, np.uint8)
+            out[1:-1, 1:-1] = f.astype(np.uint8)
+            return out
+        R, G, B = arr[..., 0], arr[..., 1], arr[..., 2]
+        s = R + G + B
+        luma = (((R * 77 + G * 150 + B * 29) >> 8) & 0xFF).astype(np.uint8)
+        gray = ((s // 3) & 0xFF).astype(np.uint8)
+        chroma = (np.maximum(np.maximum(R, G), B) - np.minimum(np.minimum(R, G), B)).astype(np.uint8)
+        u = (((MOD7[R] + MOD7[G] + MOD7[B]) * 14) & 0xFF).astype(np.uint8)
+        winding = (((s >> 8) & 0xFF) * 85).astype(np.uint8)
+        d1 = ((R - G) & 0xFF).astype(np.uint8); d2 = ((G - B) & 0xFF).astype(np.uint8)
+        logs = [plaq(evolve(gray, t)) for t in (0, 1, 4, 16, 64, 128)]
+        return np.stack([R.astype(np.uint8), G.astype(np.uint8), B.astype(np.uint8),
+                         luma, gray, chroma, u, winding, d1, d2] + logs, 0)
+
+    cube = wave_encode(synth_frame())                      # (16,113,128) uint8
+    gridA = cube.astype(np.float64) / 255.0                # oracle grid
+    nvac = int(((gridA.mean(-1) < 1e-3)).sum())
+    print(f"  webapp e2e frame: {nvac} vacuum tokens, {int((cube == 255).sum())} saturated bytes")
+
+    # -- shared numpy oracle pieces (validated vs the torch app) --
+    def lno(v, g, b, eps=1e-5):
+        m = v.mean(-1, keepdims=True)
+        return (v - m) / np.sqrt(((v - m) ** 2).mean(-1, keepdims=True) + eps) * g + b
+    def rot2(v):                                           # 4D rope rotate-half (2-dim chunks)
+        o = np.empty_like(v)
+        o[..., 0::2] = -v[..., 1::2]; o[..., 1::2] = v[..., 0::2]
+        return o
+    def front16(g32f, pfx):
+        arc = np.clip((gridA * 256.0).astype(np.int64), 0, 255)
+        c = np.array(COSF)[arc]; s = np.array(SINF)[arc]
+        stk = np.concatenate([np.clip(c, 0, None), np.clip(s, 0, None),
+                              np.clip(-c, 0, None), np.clip(-s, 0, None)], -1).reshape(Na, 512)
+        stk = stk * g32f(pfx + "quadrant_proj.modulation")
+        zt = stk @ g32f(pfx + "quadrant_proj.proj.weight").T + g32f(pfx + "quadrant_proj.proj.bias")
+        vac = (gridA.mean(-1) < 1e-3).reshape(Na, 1)
+        demb = g32f(pfx + "vacuum_emb.depth_emb.weight")[np.repeat(np.arange(Da), Ha)]
+        vemb = g32f(pfx + "vacuum_emb.vacuum_emb").reshape(1, -1)
+        return zt + demb * (1.0 - vac) + vemb * vac
+
+    # -- SOLITON at app scale: oracle + ring --
+    cosA = g32(MM + "layers.0.rope.cos_cached")[:Da, :Ha].reshape(Na, HD2)
+    sinA = g32(MM + "layers.0.rope.sin_cached")[:Da, :Ha].reshape(Na, HD2)
+    def soliton_o():
+        x = front16(g32, MM)
+        for li in range(NL2):
+            L = f"{MM}layers.{li}."
+            proj = x @ g32(L + "in_proj.weight").T + g32(L + "in_proj.bias")
+            q, k, v, dl = proj[:, :Cs], proj[:, Cs:2*Cs], proj[:, 2*Cs:3*Cs], proj[:, 3*Cs:]
+            qh = q.reshape(Na, NH2, HD2).transpose(1, 0, 2)
+            kh = k.reshape(Na, NH2, HD2).transpose(1, 0, 2)
+            vv = v.reshape(Na, NH2, HD2).transpose(1, 0, 2)
+            dh = spo(dl).T[:, :, None]
+            qh = qh * cosA + rot2(qh) * sinA; kh = kh * cosA + rot2(kh) * sinA
+            st = dh * (kh * vv)
+            out = np.empty_like(st); gs = st.sum(1, keepdims=True)
+            cur = st.reshape(NH2, Da, Ha, HD2).copy()
+            for hh in range(NH2):
+                if dstep[hh] < 0: out[hh] = gs[hh]
+            for stp in range(1, 17):
+                cur = (np.roll(cur, 1, 1) + np.roll(cur, -1, 1) + np.roll(cur, 1, 2)
+                       + np.roll(cur, -1, 2) + 4.0 * cur) / 8.0
+                for hh in range(NH2):
+                    if dstep[hh] == stp: out[hh] = Na * cur[hh].reshape(Na, HD2)
+            y = (qh * out).transpose(1, 0, 2).reshape(Na, Cs)
+            y = rho(y, g32(L + "norm.weight"))
+            w = np.exp(x @ g32(L + "gate_route.weight").T + g32(L + "gate_route.bias"))
+            w = w / w.sum(-1, keepdims=True)
+            gg = x @ g32(L + "gate_proj.weight").T + g32(L + "gate_proj.bias") + w @ g32(L + "arm_bias")
+            y = y * (1 / (1 + np.exp(-np.clip(gg, -500, 500))))
+            x = y @ g32(L + "out_proj.weight").T + g32(L + "out_proj.bias")
+        return x.mean(0) @ g32(MM + "head.weight").T + g32(MM + "head.bias")
+
+    Q255 = [((u << FRAC) + 127) // 255 for u in range(256)]        # ring ingest of x/255
+    gridA_q = [[Q255[int(u)] for u in row] for row in cube.reshape(Na, Cs)]
+    def ring_rope(fx, key):
+        c, shp = fx[key + "cos_cached"]; s, _ = fx[key + "sin_cached"]
+        ca = np.array(c).reshape(shp)[:Da, :Ha].reshape(Na, HD2)
+        sa = np.array(s).reshape(shp)[:Da, :Ha].reshape(Na, HD2)
+        return [[int(v) for v in r] for r in ca], [[int(v) for v in r] for r in sa]
+    cosA_q, sinA_q = ring_rope(fx2, MM + "layers.0.rope.")
+
+    t0 = _time.time(); slo = soliton_o(); t1 = _time.time()
+    slr = Q.soliton_forward(gridA_q, W2, cosA_q, sinA_q, Da, Ha, Cs, NH2, HD2, NL2, NCLS,
+                            Da, Ha, prefix=MM)
+    t2 = _time.time()
+    slrf = np.array([dq(v) for v in slr])
+    cosSA = float(slrf @ slo / (np.linalg.norm(slrf) * np.linalg.norm(slo) + 1e-12))
+    print(f"  APP-E2E Soliton (N=1808): cosine {cosSA:.6f}, argmax ring={int(slrf.argmax())} "
+          f"oracle={int(slo.argmax())}  [oracle {t1-t0:.0f}s, ring {t2-t1:.0f}s]")
+    check("APP-E2E soliton: ring == app forward (cosine > 0.999)", cosSA > 0.999)
+    check("APP-E2E soliton: argmax matches", int(slrf.argmax()) == int(slo.argmax()))
+
+    # -- ROTOR (RotorHeads: RDT + LatticeAttention radius-1 + cls) at app scale --
+    if RAPP is None:
+        print("  (rotor heads checkpoint not in HF cache — webapp rotor gate skipped)")
+    else:
+        fx3 = ck.load_fixed(RAPP, frac=FRAC)
+        z3 = zipfile.ZipFile(RAPP); r3 = z3.namelist()[0].split("/")[0]
+        refs3 = dict(ck._flatten(ck._RingUnpickler(io.BytesIO(z3.read(f"{r3}/data.pkl"))).load()))
+        RB = "model._orig_mod."
+        def r32(n):
+            r = refs3[RB + n]; k = r.storage[2]; nn = 1
+            for s in r.size: nn *= s
+            return np.frombuffer(z3.read(f"{r3}/data/{k}"), dtype=np.float32, count=nn).astype(np.float64).reshape(r.size)
+        def W3(n): return fx3[RB + n][0]
+        NHr, HDr = 16, 8
+        cosR3 = r32("enc.encoder.layer.self_attn.rope.cos_cached")[:Da, :Ha].reshape(Na, HDr)
+        sinR3 = r32("enc.encoder.layer.self_attn.rope.sin_cached")[:Da, :Ha].reshape(Na, HDr)
+        def rotor_o():
+            E = "enc.encoder."; A = E + "layer.self_attn."
+            zt = front16(r32, "enc.")
+            x0 = zt.copy(); h = zt.copy()
+            for step in range(2):
+                al = 1 / (1 + np.exp(-(x0 @ r32(E + "inject_gate.0.weight").T + r32(E + "inject_gate.0.bias"))))
+                h_in = h + al * x0 + r32(E + "depth_embed.weight")[step]
+                tt = lno(h_in, r32(E + "layer.norm1.weight"), r32(E + "layer.norm1.bias"))
+                qh = (tt @ r32(A + "q_proj.weight").T + r32(A + "q_proj.bias")).reshape(Na, NHr, HDr).transpose(1, 0, 2)
+                kh = (tt @ r32(A + "k_proj.weight").T + r32(A + "k_proj.bias")).reshape(Na, NHr, HDr).transpose(1, 0, 2)
+                vh = (tt @ r32(A + "v_proj.weight").T + r32(A + "v_proj.bias")).reshape(Na, NHr, HDr).transpose(1, 0, 2)
+                qh = lno(qh, r32(A + "q_norm.weight"), r32(A + "q_norm.bias"))
+                kh = lno(kh, r32(A + "k_norm.weight"), r32(A + "k_norm.bias"))
+                qh = qh * cosR3 + rot2(qh) * sinR3; kh = kh * cosR3 + rot2(kh) * sinR3
+                qs = qh.reshape(NHr, Da, Ha, HDr); ks = kh.reshape(NHr, Da, Ha, HDr)
+                vs = vh.reshape(NHr, Da, Ha, HDr)
+                kk = np.stack([np.roll(np.roll(ks, -di, 1), -dj, 2)
+                               for di in (-1, 0, 1) for dj in (-1, 0, 1)], 3)
+                vv = np.stack([np.roll(np.roll(vs, -di, 1), -dj, 2)
+                               for di in (-1, 0, 1) for dj in (-1, 0, 1)], 3)
+                sc = (qs[:, :, :, None, :] * kk).sum(-1) / math.sqrt(HDr)
+                e = np.exp(sc - sc.max(-1, keepdims=True)); wA = e / e.sum(-1, keepdims=True)
+                ctx = (wA[..., None] * vv).sum(3).reshape(NHr, Na, HDr).transpose(1, 0, 2).reshape(Na, Cs)
+                x1 = h_in + ctx @ r32(A + "out_proj.weight").T + r32(A + "out_proj.bias")
+                ff = lno(x1, r32(E + "layer.norm2.weight"), r32(E + "layer.norm2.bias"))
+                ff = ff @ r32(E + "layer.linear1.weight").T + r32(E + "layer.linear1.bias")
+                ff = 0.5 * ff * (1.0 + ERF(ff / math.sqrt(2.0)))
+                hn = x1 + ff @ r32(E + "layer.linear2.weight").T + r32(E + "layer.linear2.bias")
+                gg = 1 / (1 + np.exp(-np.clip(np.concatenate([h, hn], -1) @ r32(E + "gate.0.weight").T + r32(E + "gate.0.bias"), -500, 500)))
+                h = gg * hn + (1.0 - gg) * h
+            return h.mean(0) @ r32("cls.weight").T + r32("cls.bias")
+
+        cosR3q, sinR3q = ring_rope(fx3, RB + "enc.encoder.layer.self_attn.rope.")
+        t0 = _time.time(); rlo = rotor_o(); t1 = _time.time()
+        rlr = Q.rotor_lattice_forward(gridA_q, W3, cosR3q, sinR3q, Da, Ha, Cs, NHr, HDr, 2,
+                                      NCLS, prefix="enc.", head="cls.")
+        t2 = _time.time()
+        rlrf = np.array([dq(v) for v in rlr])
+        cosRA = float(rlrf @ rlo / (np.linalg.norm(rlrf) * np.linalg.norm(rlo) + 1e-12))
+        print(f"  APP-E2E Rotor (LatticeAttention, N=1808): cosine {cosRA:.6f}, argmax "
+              f"ring={int(rlrf.argmax())} oracle={int(rlo.argmax())}  [oracle {t1-t0:.0f}s, ring {t2-t1:.0f}s]")
+        check("APP-E2E rotor: ring == app forward (cosine > 0.999)", cosRA > 0.999)
+        check("APP-E2E rotor: argmax matches", int(rlrf.argmax()) == int(rlo.argmax()))
+        # the app's FUSED prediction (0.5·softmax(rotor) + 0.5·softmax(soliton))
+        def smax(v): return np.exp(v - v.max()) / np.exp(v - v.max()).sum()
+        f_o = 0.5 * smax(rlo) + 0.5 * smax(slo)
+        f_r = 0.5 * smax(rlrf) + 0.5 * smax(slrf)
+        check("APP-E2E fused prediction: argmax matches the app", int(f_r.argmax()) == int(f_o.argmax()))
 
 # ---------- the quanta PACKAGE compute path must be float-free / import-clean (AST) ----------
 print("  package float-free / no numpy·math (AST):")

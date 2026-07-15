@@ -38,9 +38,10 @@ def softplus_fixed(x, frac=FRAC):
 
 
 def _rot_half8(v):
-    """QuantumRoPE rotate_half for head_dim=8: each 4-dim half rotated by its 2-dim quarters."""
-    z1, z2, x1, x2 = v[:2], v[2:4], v[4:6], v[6:8]
-    return [-z2[0], -z2[1], z1[0], z1[1], -x2[0], -x2[1], x1[0], x1[1]]
+    """QuantumRoPE4D rotate_half at head_dim=8: FOUR 2-dim ADI-axis chunks, each (-x1, x0).
+    (The deployed 4D rope rotates within dim/4 chunks — NOT two 4-dim halves. The old halves
+    form was self-consistently wrong vs the real torch model; caught by the webapp e2e anchor.)"""
+    return [-v[1], v[0], -v[3], v[2], -v[5], v[4], -v[7], v[6]]
 
 
 def _rope(vh, cosq, sinq, N, HD):
@@ -109,11 +110,15 @@ def mamba2_ssd_layer(x, W, name, cosRq, sinRq, N, C, NH, HD, gh, gw):
     arm = W(name + "arm_bias")                    # flat 5*C
     gp_w = W(name + "gate_proj.weight"); gp_b = W(name + "gate_proj.bias")
     gr_w = W(name + "gate_route.weight"); gr_b = W(name + "gate_route.bias")
-    out = []
+    gflat = []                                    # all tokens' gate args -> ONE sigmoid block call
     for t in range(N):
         route = infer.softmax(infer.linear(x[t], gr_w, gr_b, 5, C, FRAC), FRAC)   # [5] weights
         gp = infer.linear(x[t], gp_w, gp_b, C, C, FRAC)
-        g = [gp[d] + sum(_sd(rn.mul(route[a], arm[a*C + d]), ONE) for a in range(5)) for d in range(C)]
-        yt = [_sd(rn.mul(y[t][d], ract.sigmoid_fixed(g[d], FRAC)), ONE) for d in range(C)]
+        gflat.extend(gp[d] + sum(_sd(rn.mul(route[a], arm[a*C + d]), ONE) for a in range(5))
+                     for d in range(C))
+    sg = ract.sigmoid_list(gflat, FRAC)
+    out = []
+    for t in range(N):
+        yt = [_sd(rn.mul(y[t][d], sg[t*C + d]), ONE) for d in range(C)]
         out.append(infer.linear(yt, W(name + "out_proj.weight"), W(name + "out_proj.bias"), C, C, FRAC))
     return out

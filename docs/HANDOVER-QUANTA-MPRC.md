@@ -27,6 +27,32 @@
 >
 > Both run_alls (Rosetta dev + native arm64) ALL GREEN incl. test_quanta, test_gemma2, test_gemma4.
 > Gluon remains blocked on a checkpoint (unchanged, see §Gluon). Historical handoff text follows.
+>
+> **WEBAPP E2E (owner follow-up, same day): "the vlm-transformer webapp is the complete test" — DONE.**
+> The deployed app (`vlm-transformers/app/serve.py`: image → 16-ch wave cube (113×128) → Rotor
+> [RDT + LatticeAttention r=1 + cls head, `heads_rdt_L2_k2384_best.pth`] ∥ Soliton [Mamba2 HF
+> export == the gated .pth, verified tensor-equal] → fused softmax) is now reproduced by the ring
+> at full scale (D=16, H=113, N=1808): **cos 1.000000 + argmax match on all four (model × image)
+> combinations** — a deterministic real-regime frame AND a real shelf photo — against logits
+> anchored to the ACTUAL TORCH APP (scratchpad app_e2e_anchor/oracle/ring, numpy oracle matches
+> torch to ~2e-5). Committed as the APP-E2E section of test_quanta (rotor + soliton + fused gates).
+>
+> The anchor exposed THREE bugs the synthetic 4×4 gates could not see (all fixed):
+> 1. **`_rot_half8` convention** — QuantumRoPE4D rotates FOUR 2-dim ADI chunks, not two 4-dim
+>    halves. The old form was self-consistently wrong in BOTH the ring and the test's numpy
+>    oracle (the circular-mirror trap; small-grid Soliton argmax was 1246, truth is 1946).
+> 2. **Vacuum branch missing** — `VacuumDepthEmbedding` gives vacuum tokens (mean phase < 1e-3,
+>    e.g. a real image's zero-padded border rows) the learned vacuum embedding INSTEAD of the
+>    depth embedding; random grids never have such sites, real frames do (291 in the e2e frame).
+> 3. **Arc wrap at phase 1.0** — `(v>>8)&0xFF` sent a saturated 255-pixel (grid 1.0) to arc 0;
+>    the deployed clip sends it to 255. Now clamped.
+> New ring pieces: `quanta.layers.lattice_encoder_layer` (radius-1 torus window attention,
+> QuantumRoPE4D, tanh-GELU ≈ the app's exact-erf nn.GELU to ~3e-4), `quanta.models.
+> rotor_lattice_forward` (the RotorHeads path), vacuum-aware `frontend`, C `sigmoid_block`/
+> `exp_block` (bit-for-bit == ract, selftested) so the 1808-token forwards run in ~1-2 min.
+> CAVEAT (small-grid vlm Rotor gate only): its oracle+ring share the sigmoid-GELU form while the
+> real vlm layer uses exact-erf GELU — self-consistent, unanchored on that axis; the APP-scale
+> rotor gate IS erf-anchored. Anchor the vlm gate against its torch model when it next matters.
 
 ## The task
 

@@ -12,7 +12,7 @@ from ringkit.core import native as rn
 from ringkit.emulation import infer, ract
 from ringkit.quanta._ringtrig import FRAC, ONE, _sd
 from ringkit.quanta.frontend import frontend
-from ringkit.quanta.layers import rope_encoder_layer
+from ringkit.quanta.layers import lattice_encoder_layer, rope_encoder_layer
 from ringkit.quanta.ssd import mamba2_ssd_layer
 
 
@@ -65,6 +65,33 @@ def gluon_forward(grid_q, W, cosRq, sinRq, D, Hh, C, NH, HD, depth,
         z = rope_encoder_layer(z, W, f"{LY}{li}.", cosRq, sinRq, N, C, NH, HD)
     pooled = [_sd(sum(z[t][j] for t in range(N)), N) for j in range(C)]
     return _proj_head(pooled, W, C)
+
+
+def rotor_lattice_forward(grid_q, W, cosRq, sinRq, D, Hh, C, NH, HD, depth, n_classes,
+                          prefix="enc.", head="cls.", radius=1):
+    """Rotor as DEPLOYED in the webapp (RotorHeads): the same shared-recursive RDT loop as
+    rotor_forward, but the layer's attention is the LOCAL lattice interaction
+    (lattice_encoder_layer, radius-1 torus window, QuantumRoPE4D) and the readout is a bare
+    classifier Linear on the mean-pooled tokens. Returns Q<frac> logits [n_classes]."""
+    N = D * Hh
+    E = prefix + "encoder."
+    LY = E + "layer."
+    zt = frontend(grid_q, W, D, Hh, C, prefix)
+    x0 = [r[:] for r in zt]; h = [r[:] for r in zt]
+    de = W(E + "depth_embed.weight")
+    ig_w = W(E + "inject_gate.0.weight"); ig_b = W(E + "inject_gate.0.bias")
+    g_w = W(E + "gate.0.weight"); g_b = W(E + "gate.0.bias")
+    al = [ract.sigmoid_list(infer.linear(r, ig_w, ig_b, C, C, FRAC), FRAC) for r in x0]
+    for step in range(depth):
+        h_in = [[h[t][j] + _sd(rn.mul(al[t][j], x0[t][j]), ONE) + de[rn.mul(step, C) + j]
+                 for j in range(C)] for t in range(N)]
+        hn = lattice_encoder_layer(h_in, W, LY, cosRq, sinRq, N, C, NH, HD, D, Hh, radius)
+        g = [ract.sigmoid_list(infer.linear(h[t] + hn[t], g_w, g_b, C, 2 * C, FRAC), FRAC)
+             for t in range(N)]
+        h = [[_sd(rn.mul(g[t][j], hn[t][j]), ONE) + _sd(rn.mul(ONE - g[t][j], h[t][j]), ONE)
+              for j in range(C)] for t in range(N)]
+    pooled = [_sd(sum(h[t][j] for t in range(N)), N) for j in range(C)]
+    return infer.linear(pooled, W(head + "weight"), W(head + "bias"), n_classes, C, FRAC)
 
 
 def soliton_forward(grid_q, W, cosRq, sinRq, D, Hh, C, NH, HD, num_layers, n_classes,
