@@ -23,6 +23,8 @@ _BUILD = os.path.join(_DIR, "..", "build")          # all compiled kernels land 
 _C = os.path.join(_DIR, "ring_ops.c")
 _U8 = ctypes.POINTER(ctypes.c_uint8)
 _NAMES = ("ring_mul", "ring_add", "ring_sub", "ring_mul_u64", "ring_add_u64", "ring_sub_u64")
+_OP_IDX = {"ring_mul": 0, "ring_add": 1, "ring_sub": 2}
+NTHREADS = min(os.cpu_count() or 1, 16)      # specialised-MPP block count for ring_ew_mt
 
 # Metal auto-routing is OFF by default (METAL_MIN = None): measured 2026-07-12 on M1 Pro,
 # C SIMD wins the elementwise trio at EVERY size (6.5 GMUPS vs ~0.95 GMUPS at 2^24) because
@@ -77,7 +79,14 @@ def _load():
             fn = getattr(lib, name)
             fn.argtypes = [_U8, _U8, _U8, ctypes.c_long]
             fn.restype = None
+        lib.ring_ew_mt.argtypes = [_U8, _U8, _U8, ctypes.c_long, ctypes.c_int, ctypes.c_long]
+        lib.ring_ew_mt.restype = None
+        lib.ring_ew_pool.argtypes = [_U8, _U8, _U8, ctypes.c_long, ctypes.c_int, ctypes.c_long]
+        lib.ring_ew_pool.restype = None
         if not _selftest(lambda op, out, a, b, n: getattr(lib, op)(_ptr(out), _ptr(a), _ptr(b), n)):
+            _lib = None
+            return None
+        if not _selftest_mt(lib):     # MPP block-split == scalar, bit-for-bit, at real (splitting) size
             _lib = None
             return None
         _lib = lib
@@ -118,6 +127,43 @@ def _selftest(call):
         if got != want:
             return False
     return True
+
+
+def _selftest_mt(lib):
+    """Gate the specialised-MPP block kernel at a size that ACTUALLY splits (> EW_MT_MIN),
+    over an odd block count so the last block is a ragged remainder: every op, threaded ==
+    the scalar reference, bit-for-bit. A wrong block boundary would corrupt exactly here."""
+    import os as _os
+    n = (1 << 18) + 777                                    # > EW_MT_MIN, not a multiple of nthreads
+    a = bytearray(_os.urandom(n)); b = bytearray(_os.urandom(n))
+    for op, idx in _OP_IDX.items():
+        want = bytearray(_PY[op](a[i], b[i]) for i in range(n))
+        for fn in (lib.ring_ew_mt, lib.ring_ew_pool):       # both MPP forms, bit-for-bit
+            got = bytearray(n)
+            try:
+                fn(_ptr(got), _ptr(a), _ptr(b), n, idx, 7)   # 7 blocks -> ragged tail
+            except Exception:
+                return False
+            if got != want:
+                return False
+    return True
+
+
+def ew_mt(name, a, b, out=None, nthreads=NTHREADS):
+    """Elementwise ring op via the specialised-MPP block split (disjoint blocks over C-owned
+    memory, lock-free, merge-free). name in ring_mul/add/sub. Falls back to the Python
+    reference if the C path is unavailable. Bit-identical to `mul`/`add`/`sub`."""
+    n = len(a)
+    if out is None:
+        out = bytearray(n)
+    lib = _load()
+    if lib is None:
+        pref = _PY[name]
+        for i in range(n):
+            out[i] = pref(a[i], b[i])
+        return out
+    lib.ring_ew_mt(_ptr(out), _ptr(a), _ptr(b), n, _OP_IDX[name], nthreads)
+    return out
 
 
 def available():

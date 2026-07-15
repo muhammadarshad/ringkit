@@ -16,15 +16,40 @@ torch-cpu OK, torch-mps OK (mix32 int32-wrap semantics hold on MPS).
 
 ### Elementwise ring mul (uint8 wrap) — GMUPS, higher is better
 
-| size | ringkit C | numpy | torch cpu | torch mps | ringkit metal |
-|------|-----------|-------|-----------|-----------|---------------|
-| 2^20 | 23.2      | 31.1  | 15.7      | 4.1       | 1.7           |
-| 2^24 | 26.1      | 24.2  | 29.0      | 23.8      | 1.8           |
+Single-thread C ties numpy; the **specialised-MPP block-split (persistent pool, disjoint blocks
+over C-owned memory) beats numpy at DRAM scale** — corrected 2026-07-15 (3-run medians, native):
 
-**Verdict: a tie, correctly.** Elementwise uint8 is pure memory bandwidth; every competent
-engine converges to the same wall (~24-30 GMUPS native). GPUs don't help (even torch's
-resident-tensor MPS only matches CPU at 16M), which is why ringkit's metal elementwise is
-opt-in and its copies-included number is worst — as documented in backend.METAL_MIN.
+| size | ringkit C | ringkit C(pool) | numpy | torch cpu | torch mps | ringkit metal |
+|------|-----------|-----------------|-------|-----------|-----------|---------------|
+| 2^20 | 30.6      | 23.6            | 31.0  | 15.0      | 3.5       | 1.5           |
+| 2^24 | 23.0      | **38.3**        | 24.3  | 37.5      | 24.9      | 2.4           |
+
+**Verdict — the "bandwidth wall" is per-CORE, not absolute.** At 2^20 (cache-resident) it is a
+genuine tie: one core saturates the working set, threading only adds sync overhead (pool 23.6 <
+numpy 31). At 2^24 (16 MB, DRAM-streaming) a single core reaches only ~one memory channel
+(numpy 24 GMUPS ≈ 70 GB/s); the **MPP pool reaches the aggregate bus and beats numpy ~1.6x
+(38 vs 24)**, matching multithreaded torch-cpu. The naive per-call-spawn variant LOST (spawn cost
+swamps a bandwidth op); a persistent worker pool is required. All variants bit-for-bit gated
+(scalar == mt == pool, ragged block counts).
+
+### Block-model ablation (multi-pass 7-walk, N=16 MB, K=48 passes) — GMUPS, bit-identical
+
+The encoder shape: the same tile touched K times. Isolates L1-residency, unroll, threading.
+
+| factor              | setting              | GMUPS | note |
+|---------------------|----------------------|-------|------|
+| **tile size** (1T)  | 14 KB canvas (≤L1)   | 61.5  | **2.3x over streaming** |
+|                     | 64 KB (=½ L1 w/ c+b) | 60.2  | still fast |
+|                     | 128 KB (spills L1)   | 33.9  | 1.25x |
+|                     | 16 MB (stream)       | 27.0  | 1.00x baseline |
+| **unroll** (canvas) | 1 / 4 / 64           | 61 / 61 / 58 | **no effect — L1-BW bound, not ILP bound** |
+| **threads × tile**  | stream × 10          | 103   | MPP alone, 3.6x |
+|                     | **14 KB × 10**       | **211** | **L1-residency × MPP compound = 7.3x** |
+
+**Verdict:** for a *reused* tile, L1-residency (2.3x) and MPP block-split (3.6x) multiply to
+**~7.3x** (211 vs 29 GMUPS). The 14 KB CXR canvas sits dead-center in the fast tile regime
+(working set = c + b tiles ≤ L1). Unroll is a measured null. GPUs still don't help single
+elementwise passes (metal copies-included is worst) — as documented in backend.METAL_MIN.
 
 ### Wilson plaquette stencil, 128³ — ns/node, lower is better
 
@@ -114,8 +139,10 @@ because the GPU never was emulated.
 
 ## Takeaways
 
-1. Where physics is trivial (elementwise), ringkit ties the best engines — the substrate
-   wastes nothing, and nobody beats bandwidth.
+1. Elementwise: ties numpy at cache-resident sizes, and BEATS it ~1.6x at DRAM scale via the
+   MPP block-split (aggregate bus > one core). The bandwidth wall is per-core; on the reused
+   multi-pass canvas, L1-resident tiling × MPP compound to ~7x. (Corrected 2026-07-15: the old
+   "nobody beats bandwidth" was measured against single-thread numpy only.)
 2. Where structure exists (stencil), the fused C kernel beats numpy/torch by ~4x.
 3. Where the ring compute is dense (Metropolis + derived RNG), the unified-memory design
    wins by ~65-85x against engines using the same hardware — including torch on the same GPU.

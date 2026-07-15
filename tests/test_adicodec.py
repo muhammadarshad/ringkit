@@ -18,7 +18,8 @@ random.seed(3)
 print("== 1. THE BAR: lossless (bit-for-bit) over cubes of every shape ==")
 bad = 0; tried = 0
 for (nz, R, C) in [(1, 1, 1), (1, 2, 3), (9, 16, 6), (4, 7, 5), (2, 1, 8), (16, 32, 6),
-                   (3, 16, 1), (5, 5, 5), (1, 128, 6)]:
+                   (3, 16, 1), (5, 5, 5), (1, 128, 6),
+                   (1, 122, 256), (1, 300, 256), (1, 1, 320)]:   # dims > 255 (real .qcm shapes)
     for _ in range(30):
         cube = [[[random.randint(0, 255) for _ in range(C)] for _ in range(R)] for _ in range(nz)]
         tried += 1

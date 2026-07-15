@@ -288,6 +288,7 @@ def bench_elementwise(tdevs):
         a = bytearray(os.urandom(n)); b = bytearray(os.urandom(n)); out = bytearray(n)
         lib = backend._load()
         cols = [f"ringkit-C {n/bench(lambda: lib.ring_mul(backend._ptr(out), backend._ptr(a), backend._ptr(b), n))/1e9:6.2f}"]
+        cols.append(f"rk-C(pool) {n/bench(lambda: lib.ring_ew_pool(backend._ptr(out), backend._ptr(a), backend._ptr(b), n, 0, backend.NTHREADS))/1e9:6.2f}")
         na = np.frombuffer(bytes(a), dtype=np.uint8); nb = np.frombuffer(bytes(b), dtype=np.uint8)
         no = np.empty(n, dtype=np.uint8)
         cols.append(f"numpy {n/bench(lambda: np.multiply(na, nb, out=no))/1e9:6.2f}")

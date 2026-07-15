@@ -59,8 +59,12 @@ gated algorithms at their best (native arm64, resident tensors).
 - Ring GEMM: hardware bridge **215 GMAC/s** (2.2x torch-mps, 16x Accelerate BLAS);
   **multiplier-free shift-add 55 GMAC/s beats every external CPU engine**; on GPU the
   zero-multiply QSM-LUT beats torch-mps's hardware matmul — the bottleneck thesis, measured.
-- Elementwise ops tie everyone at the bandwidth wall (they carry no ring structure — that
-  parity is the physically honest result).
+- Elementwise: a **tie with numpy at cache-resident sizes** (one core is the memory wall), but
+  the **MPP block-split beats numpy ~1.8x at DRAM scale** (2^24: 38 vs 24 GMUPS, matching
+  multithreaded torch-cpu) — the wall is per-*core*, and the disjoint-block pool reaches the
+  aggregate bus. On the *reused* multi-pass canvas (the encoder shape), L1-resident 14 KB tiling
+  and MPP **compound to ~7x** (211 vs 29 GMUPS, ablated, bit-identical). The earlier "ties
+  everyone" was measured against single-thread numpy only — corrected 2026-07-15.
 
 ## Layout
 

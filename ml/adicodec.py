@@ -101,9 +101,9 @@ def encode_cube(zones):
     R = len(zones[0])
     C = len(zones[0][0])
     bw = _BitWriter()
-    bw.write(nz, 16)
-    bw.write(R, 8)
-    bw.write(C, 8)
+    bw.write(nz, 32)          # 32-bit dims: R/C routinely exceed 255 (e.g. 256 alive features,
+    bw.write(R, 32)           # 1000+ reference vectors). 8-bit fields silently overflowed -> data
+    bw.write(C, 32)           # loss; caught on real .qcm matrices (C=256), fixed 2026-07-15.
 
     const = []                        # per column: (is_const, value)
     for c in range(C):
@@ -133,9 +133,9 @@ def encode_cube(zones):
 def decode_cube(data):
     """Inverse of encode_cube — the exact cube (list of R×C matrices)."""
     br = _BitReader(data)
-    nz = br.read(16)
-    R = br.read(8)
-    C = br.read(8)
+    nz = br.read(32)
+    R = br.read(32)
+    C = br.read(32)
 
     const = []
     for _ in range(C):
