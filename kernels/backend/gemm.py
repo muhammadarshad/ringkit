@@ -102,7 +102,18 @@ def _ptr(ba):
 
 def gemm(A, B, M, K, N, variant="mul", out=None):
     """C = A(MxK) @ B(KxN) mod 256 over flat uint8 buffers. Returns a bytearray, or None
-    if the silicon is unavailable (caller falls back to the Python reference)."""
+    if the silicon is unavailable (caller falls back to the Python reference).
+
+    CUDA (kernels/nvidia/cuda) is tried FIRST when present + self-tested — the GPU path serves the
+    encoder/gallery GEMV. Falls through to the C SIMD variants, then the caller's Python reference."""
+    try:
+        from ringkit.kernels.nvidia.cuda import host as _cuda
+        if _cuda.available():
+            r = _cuda.gemm(A, B, M, K, N, out=out)
+            if r is not None:
+                return r
+    except Exception:
+        pass
     lib = _load()
     if lib is None or variant not in VARIANTS:
         return None

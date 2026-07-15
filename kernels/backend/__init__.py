@@ -38,6 +38,8 @@ _lib = None
 _tried = False
 _metal = None
 _metal_tried = False
+_cuda = None
+_cuda_tried = False
 
 
 def so_path(stem):
@@ -171,9 +173,28 @@ def available():
     return _load() is not None
 
 
+def _load_cuda():
+    """CUDA elementwise backend (kernels/nvidia/cuda), self-tested before serving. None if absent."""
+    global _cuda, _cuda_tried
+    if _cuda is not None or _cuda_tried:
+        return _cuda
+    _cuda_tried = True
+    try:
+        from ringkit.kernels.nvidia.cuda import host as ch
+        if not ch.available():
+            return None
+        if not _selftest(lambda op, out, a, b, n: ch.elementwise(op, out, a, b, n)):
+            return None
+        _cuda = ch
+    except Exception:
+        _cuda = None
+    return _cuda
+
+
 def backends():
     """Status of every registered backend: name -> 'serving' | 'unavailable'."""
     return {"metal": "serving" if _load_metal() is not None else "unavailable",
+            "cuda": "serving" if _load_cuda() is not None else "unavailable",
             "cpu-c": "serving" if _load() is not None else "unavailable",
             "python": "serving"}
 
@@ -184,6 +205,8 @@ def active(n=0):
         return "metal"
     if _load() is not None:
         return "cpu-c"
+    if _load_cuda() is not None:                 # GPU serves elementwise when the C path is absent
+        return "cuda"
     return "python"
 
 
@@ -222,6 +245,10 @@ def elementwise(name, a, b, unroll=False):
         fn = getattr(_lib, name if name.endswith("_u64") else base)
         fn(_ptr(out), _ptr(ab), _ptr(bb), n)
         return out
+    if which == "cuda":
+        if _cuda.elementwise(base, out, ab, bb, n) == 0:        # GPU (when the C path is absent)
+            return out
+        # dispatch failed -> Python reference
     f = _PY[base]                                               # pure-Python reference
     for i in range(n):
         out[i] = f(a[i], b[i])
