@@ -78,6 +78,9 @@ def _load():
             fn.restype = ctypes.c_int
         lib.ring_gemm.argtypes = [_U8, _U8, _U8, ctypes.c_long, ctypes.c_long, ctypes.c_long]
         lib.ring_gemm.restype = ctypes.c_int
+        lib.ring_l1dist.argtypes = [ctypes.POINTER(ctypes.c_int), _U8, _U8,
+                                    ctypes.c_long, ctypes.c_long, ctypes.c_long]
+        lib.ring_l1dist.restype = ctypes.c_int
         if lib.rk_cuda_available() != 1 or not _selftest(lib):
             _lib = None
             return None
@@ -116,6 +119,32 @@ def _selftest(lib):
     got = bytearray(M * N)
     if lib.ring_gemm(_ptr(got), _ptr(A), _ptr(B), M, K, N) != 0 or got != want:
         return False
+    # ring_l1dist: ENERGY-side ring-L1 distance — reproduce the ml.attention / kv_cache reference
+    # (rdist summed, no mod fold) bit-for-bit. This is the distance ring_gemm CANNOT serve.
+    def _rdist(x, y):
+        d = (x - y) & 0xFF; ee = 256 - d
+        return d if d < ee else ee
+    m2, n2, dim2 = 4, 5, 7
+    Q = bytearray((i * 13 + 2) & 0xFF for i in range(m2 * dim2))
+    Kk = bytearray((i * 7 + 50) & 0xFF for i in range(n2 * dim2))
+    want_d = [sum(_rdist(Q[i * dim2 + d], Kk[j * dim2 + d]) for d in range(dim2))
+              for i in range(m2) for j in range(n2)]
+    Dout = (ctypes.c_int * (m2 * n2))()
+    if lib.ring_l1dist(Dout, _ptr(Q), _ptr(Kk), m2, n2, dim2) != 0 or list(Dout) != want_d:
+        return False
+    # REAL-MAGNITUDE regime (the int64-overflow-that-hung lesson): gate the accumulator at the
+    # scale real descriptors produce. dimB=2048 all at the MAX ring distance (128) -> 262144 per
+    # row; must be exact (no wrap). Plus an asymmetric case exercising the min() branch.
+    dimB = 2048
+    Qb = bytearray([0] * dimB + [10] * dimB)          # 2 rows
+    Kb = bytearray([128] * dimB + [200] * dimB)       # 2 rows
+    wantB = [sum(_rdist(Qb[i * dimB + d], Kb[j * dimB + d]) for d in range(dimB))
+             for i in range(2) for j in range(2)]
+    DB = (ctypes.c_int * 4)()
+    if lib.ring_l1dist(DB, _ptr(Qb), _ptr(Kb), 2, 2, dimB) != 0 or list(DB) != wantB:
+        return False
+    if wantB[0] != 128 * dimB:                        # 0 vs 128 = max arc distance, exact sum
+        return False
     return True
 
 
@@ -146,3 +175,19 @@ def gemm(A, B, M, K, N, out=None):
     if lib.ring_gemm(_ptr(C), _ptr(Ab), _ptr(Bb), M, K, N) != 0:
         return None
     return C
+
+
+def l1dist(Q, K, m, n, dim):
+    """Ring-L1 distance matrix D[i,j] = SUM_d min(|Q[i,d]-K[j,d]|, 256-|.|), the ENERGY side
+    (int32, NEVER folded mod 256 — unlike gemm). Q,K are flat uint8 buffers of length m*dim / n*dim
+    (row-major). Returns a ctypes c_int array of length m*n (row-major D), or None if CUDA is
+    unavailable. Bit-for-bit == ml.attention.ring_distance summed / kv_cache.c::kv_scores."""
+    lib = _load()
+    if lib is None:
+        return None
+    Qb = Q if isinstance(Q, bytearray) else bytearray(Q)
+    Kb = K if isinstance(K, bytearray) else bytearray(K)
+    D = (ctypes.c_int * (m * n))()
+    if lib.ring_l1dist(D, _ptr(Qb), _ptr(Kb), m, n, dim) != 0:
+        return None
+    return D
