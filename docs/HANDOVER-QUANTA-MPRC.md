@@ -34,8 +34,8 @@
 > export == the gated .pth, verified tensor-equal] → fused softmax) is now reproduced by the ring
 > at full scale (D=16, H=113, N=1808): **cos 1.000000 + argmax match on all four (model × image)
 > combinations** — a deterministic real-regime frame AND a real shelf photo — against logits
-> anchored to the ACTUAL TORCH APP (scratchpad app_e2e_anchor/oracle/ring, numpy oracle matches
-> torch to ~2e-5). Committed as the APP-E2E section of test_quanta (rotor + soliton + fused gates).
+> anchored to the ACTUAL TORCH APP (`bench/webapp_e2e/` — anchor/oracle/ring recipe, numpy oracle
+> matches torch to ~2e-5). Committed as the APP-E2E section of test_quanta (rotor + soliton + fused).
 >
 > The anchor exposed THREE bugs the synthetic 4×4 gates could not see (all fixed):
 > 1. **`_rot_half8` convention** — QuantumRoPE4D rotates FOUR 2-dim ADI chunks, not two 4-dim

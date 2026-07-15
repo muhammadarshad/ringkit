@@ -195,7 +195,7 @@ else:
 # -> fused prediction. Here the SAME deterministic real-regime frame (vacuum padding rows +
 # saturated 255s, the regimes a random grid never exercises) runs through an inline numpy oracle
 # of the app forward — VALIDATED against the actual torch app to fp32 precision (maxerr ~2e-5,
-# scratchpad/app_e2e_anchor.py + app_e2e_oracle.py, 2026-07-15; incl. the real shelf photo) —
+# bench/webapp_e2e/app_e2e_anchor.py + app_e2e_oracle.py, 2026-07-15; incl. the real shelf photo) —
 # and through the ring quanta package at the app's true scale (D=16, H=113, N=1808 tokens).
 import glob as _glob
 RAPP = next(iter(_glob.glob(os.path.expanduser(
