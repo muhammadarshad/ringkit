@@ -1,0 +1,25 @@
+[package]
+name = "ring_rust"
+version = "0.1.0"
+edition = "2021"
+description = "ringkit Rust kernel host (SPEC-014): buffer-resident FFI, cross-platform, D9 bit-exact ring kernels"
+
+[lib]
+name = "ring_rust"
+crate-type = ["cdylib"]
+
+# CPU-only kernel host (clean split: GPU = C/CUDA + Metal; CPU = Rust). Native, cross-platform via
+# cargo (fixes the C backend's cpu:False), SIMD (LLVM auto-vec + std::simd), multi-thread (rayon).
+# Pure PyO3 (no C in Rust): the crate is a Python extension module, no extern "C"/ctypes ABI.
+[dependencies]
+rayon = "1"
+pyo3 = { version = "0.22", features = ["extension-module"] }
+# The verified gevhv/backends crates (G:\quantum\research\gevhv) are the authority for the
+# bind->react->measure operator; these six GEVHV pyfunctions delegate to them instead of
+# reimplementing the math locally (see the GEVHV section of lib.rs).
+zring = { path = "../../../../gevhv/backends/zring" }
+gevhv = { path = "../../../../gevhv/backends/gevhv" }
+
+[profile.release]
+opt-level = 3
+lto = true
