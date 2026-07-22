@@ -1,0 +1,21 @@
+[package]
+name = "ring_residency"
+version = "0.1.0"
+edition = "2021"
+description = "ringkit NVMe residency kernel: byte-addressable file storage as if it were RAM, exact round-trip, no key/value/attention semantics (that's a consumer's concern, not this module's)"
+
+[lib]
+name = "ring_residency"
+crate-type = ["cdylib"]
+
+# Silicon-layer host (D9): a Python extension module (pyo3, no C, no ctypes ABI), built via
+# `maturin develop --release`. Depends on gevhv's verified `tkv` crate for the actual unbuffered
+# I/O primitives (open_unbuffered/open_unbuffered_ro/AlignedBuf/SECTOR) instead of reimplementing
+# them — same reuse pattern kernels/rust already established for the gevhv/zring dependency.
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+tkv = { path = "../../../../gevhv/backends/tkv" }
+
+[profile.release]
+opt-level = 3
+lto = true
