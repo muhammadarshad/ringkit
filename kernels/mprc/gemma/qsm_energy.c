@@ -12,11 +12,174 @@
  * |a| <= 128, |b| <= 127  ->  |a+b|,|a-b| <= 255, so SQ[0..255] suffices (sized 512 for headroom). */
 #include <stdint.h>
 #include <stddef.h>
+#ifdef _WIN32
+/* ── Windows port shim (same semantics, Win32 primitives) ─────────────────────
+ * Threads: pthread_create/join -> CreateThread/WaitForSingleObject.
+ * File map: open/fstat/mmap(PROT_READ, MAP_SHARED)/munmap/close -> _open/
+ * _fstat64/CreateFileMapping+MapViewOfFile/UnmapViewOfFile/_close.
+ * The kernel body is untouched — only these seven POSIX names are provided. */
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#define open  _open
+#define close _close
+#define fstat _fstat64
+#define stat  _stat64
+#define PROT_READ  1
+#define MAP_SHARED 1
+#define MAP_FAILED ((void*)-1)
+static void* mmap(void* addr, size_t len, int prot, int flags, int fd, long off) {
+    (void)addr; (void)prot; (void)flags; (void)off;
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    HANDLE m = CreateFileMappingA(h, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!m) return MAP_FAILED;
+    void* p = MapViewOfFile(m, FILE_MAP_READ, 0, 0, len);
+    CloseHandle(m);                     /* the view keeps the mapping alive */
+    return p ? p : MAP_FAILED;
+}
+static int munmap(void* p, size_t len) { (void)len; return UnmapViewOfFile(p) ? 0 : -1; }
+typedef HANDLE pthread_t;
+typedef struct { void* (*fn)(void*); void* arg; } rk_thr_t;
+static DWORD WINAPI rk_thr_main(LPVOID p) {
+    rk_thr_t* t = (rk_thr_t*)p;
+    t->fn(t->arg);
+    HeapFree(GetProcessHeap(), 0, t);
+    return 0;
+}
+static int pthread_create(pthread_t* tid, void* attr, void* (*fn)(void*), void* arg) {
+    (void)attr;
+    rk_thr_t* t = (rk_thr_t*)HeapAlloc(GetProcessHeap(), 0, sizeof *t);
+    if (!t) return 1;
+    t->fn = fn; t->arg = arg;
+    *tid = CreateThread(NULL, 0, rk_thr_main, t, 0, NULL);
+    return *tid ? 0 : 1;
+}
+static int pthread_join(pthread_t tid, void** ret) {
+    (void)ret;
+    WaitForSingleObject(tid, INFINITE);
+    CloseHandle(tid);
+    return 0;
+}
+/* ── 128-bit arithmetic as 64-bit chunks (QCM discipline: wide values are
+ * carried chunkwise; no compiler 128-bit type needed). Compiled as C++ (/TP)
+ * so the kernel body's expressions compile UNCHANGED via member operators.
+ * Semantics mirror __int128 exactly: low-128 wrapping mul, arithmetic >>,
+ * truncating unsigned division (bit-serial restoring; d <= 2^63-1). */
+#define restrict __restrict
+static inline uint64_t rk_umul64(uint64_t a, uint64_t b, uint64_t* hi) {
+    uint64_t a0 = (uint32_t)a, a1 = a >> 32, b0 = (uint32_t)b, b1 = b >> 32;
+    uint64_t p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+    uint64_t mid = (p00 >> 32) + (uint32_t)p01 + (uint32_t)p10;
+    *hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    return (mid << 32) | (uint32_t)p00;
+}
+static inline void rk_udiv128(uint64_t nhi, uint64_t nlo, uint64_t d,
+                              uint64_t* qhi, uint64_t* qlo) {
+    uint64_t rem = 0, qh = 0, ql = 0;
+    for (int i = 127; i >= 0; i--) {
+        uint64_t bit = i >= 64 ? (nhi >> (i - 64)) & 1u : (nlo >> i) & 1u;
+        rem = (rem << 1) | bit;                 /* rem < d <= 2^63-1: no wrap */
+        if (rem >= d) { rem -= d; if (i >= 64) qh |= 1ull << (i - 64); else ql |= 1ull << i; }
+    }
+    *qhi = qh; *qlo = ql;
+}
+struct rk_u128;
+struct rk_i128 {
+    uint64_t lo; int64_t hi;
+    rk_i128() : lo(0), hi(0) {}
+    rk_i128(int64_t v) : lo((uint64_t)v), hi(v < 0 ? -1 : 0) {}
+    rk_i128(uint64_t l, int64_t h) : lo(l), hi(h) {}
+    rk_i128& operator+=(const rk_i128& b) {
+        uint64_t nl = lo + b.lo;
+        hi += b.hi + (int64_t)(nl < lo);
+        lo = nl;
+        return *this;
+    }
+    rk_i128 operator+(int64_t v) const { rk_i128 r = *this; r += rk_i128(v); return r; }
+    rk_i128 operator-() const {
+        rk_i128 r(~lo, ~hi);
+        r.lo += 1;
+        if (r.lo == 0) r.hi += 1;
+        return r;
+    }
+    rk_i128 operator<<(long k) const {
+        if (k <= 0) return *this;
+        if (k >= 64) return rk_i128(0, (int64_t)(lo << (k - 64)));
+        return rk_i128(lo << k, (int64_t)(((uint64_t)hi << k) | (lo >> (64 - k))));
+    }
+    rk_i128 operator>>(long k) const {          /* arithmetic (floor), == __int128 >> */
+        if (k <= 0) return *this;
+        if (k >= 64) return rk_i128((uint64_t)(hi >> (k - 64 >= 63 ? 63 : k - 64)), hi < 0 ? -1 : 0);
+        return rk_i128((lo >> k) | ((uint64_t)hi << (64 - k)), hi >> k);
+    }
+    rk_i128 operator*(int64_t b) const {        /* low-128 product, sign-split */
+        int neg = (hi < 0) ^ (b < 0);
+        rk_i128 m = hi < 0 ? -(*this) : *this;
+        uint64_t ab = b < 0 ? (uint64_t)(-b) : (uint64_t)b;
+        uint64_t ph;
+        uint64_t plo = rk_umul64(m.lo, ab, &ph);
+        rk_i128 r(plo, (int64_t)(ph + (uint64_t)m.hi * ab));
+        return neg ? -r : r;
+    }
+    rk_i128 operator/(int64_t d) const {        /* truncate toward zero, d > 0 or sign-split */
+        int neg = (hi < 0) ^ (d < 0);
+        rk_i128 m = hi < 0 ? -(*this) : *this;
+        uint64_t ad = d < 0 ? (uint64_t)(-d) : (uint64_t)d;
+        uint64_t qh, ql;
+        rk_udiv128((uint64_t)m.hi, m.lo, ad, &qh, &ql);
+        rk_i128 r(ql, (int64_t)qh);
+        return neg ? -r : r;
+    }
+    bool operator<(int v) const { return v == 0 ? hi < 0 : (hi < 0 || (hi == 0 && lo < (uint64_t)v)); }
+    explicit operator int64_t() const { return (int64_t)lo; }
+};
+struct rk_u128 {
+    uint64_t lo, hi;
+    rk_u128() : lo(0), hi(0) {}
+    rk_u128(int v) : lo((uint64_t)v), hi(0) {}
+    rk_u128(uint64_t l, uint64_t h) : lo(l), hi(h) {}
+    explicit rk_u128(const rk_i128& v) : lo(v.lo), hi((uint64_t)v.hi) {}
+    bool operator==(int v) const { return hi == 0 && lo == (uint64_t)v; }
+    bool operator!=(int v) const { return !(*this == v); }
+    rk_u128 operator+(const rk_u128& b) const {
+        rk_u128 r(lo + b.lo, hi + b.hi);
+        if (r.lo < lo) r.hi += 1;
+        return r;
+    }
+    rk_u128& operator-=(const rk_u128& b) {
+        uint64_t nl = lo - b.lo;
+        hi -= b.hi + (uint64_t)(nl > lo);
+        lo = nl;
+        return *this;
+    }
+    rk_u128 operator<<(int k) const {
+        if (k <= 0) return *this;
+        if (k >= 64) return rk_u128(0, lo << (k - 64));
+        return rk_u128(lo << k, (hi << k) | (lo >> (64 - k)));
+    }
+    rk_u128 operator>>(int k) const {
+        if (k <= 0) return *this;
+        if (k >= 64) return rk_u128(hi >> (k - 64), 0);
+        return rk_u128((lo >> k) | (hi << (64 - k)), hi >> k);
+    }
+    rk_u128& operator<<=(int k) { *this = *this << k; return *this; }
+    rk_u128& operator>>=(int k) { *this = *this >> k; return *this; }
+    bool operator<=(const rk_u128& b) const { return hi < b.hi || (hi == b.hi && lo <= b.lo); }
+    bool operator>=(const rk_u128& b) const { return b <= *this; }
+    explicit operator uint64_t() const { return lo; }
+};
+extern "C" {
+#define RK_EXTERN_C_OPEN 1
+#else
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <pthread.h>
+typedef __int128 rk_i128;
+typedef unsigned __int128 rk_u128;
+#endif
 
 static int64_t SQ[512];
 static int sq_ready = 0;
@@ -51,7 +214,7 @@ void qsm_dot(int64_t * restrict out, const uint8_t * restrict xbar,
  * peels >=7 bits, so <=10 passes for any int64), then ONE memory sweep of the weight slab
  * accumulates every pass's QSM dot per row, and the row is finished in place:
  *     out[r] = sd( (SUM_p dot_p << (a_p - a_min)) << (a_min + s_row[r] + frac), z_row[r] )
- * BIT-FOR-BIT equal to the Python semantic reference emulation/gemma.py::proj (D9; __int128 for
+ * BIT-FOR-BIT equal to the Python semantic reference emulation/gemma.py::proj (D9; rk_i128 for
  * the combine so no overflow departs from Python's bigints; >> on negatives is arithmetic/floor,
  * same as Python). Rows are disjoint blocks (split/merge-free by construction — the MPP axis).
  * Returns the number of digit passes, or -1 on error. */
@@ -131,12 +294,12 @@ static void gemv_rows(int64_t * restrict out, const uint8_t * restrict xbar,
                 dot[p] += (SQ[s] - SQ[d]) >> 2;   /* a*b via QSM, exact */
             }
         }
-        __int128 acc = 0;
-        for (long p = 0; p < np; p++) acc += (__int128)dot[p] << (a_pass[p] - a_min);
+        rk_i128 acc = 0;
+        for (long p = 0; p < np; p++) acc += (rk_i128)dot[p] << (a_pass[p] - a_min);
         long shift = a_min + (long)s_row[r] + frac;
-        __int128 t = shift >= 0 ? (acc << shift) : (acc >> (-shift));
+        rk_i128 t = shift >= 0 ? (acc << shift) : (acc >> (-shift));
         int64_t z = z_row[r] ? z_row[r] : 1;
-        __int128 q = t < 0 ? -((-t) / z) : t / z; /* symmetric divide, == Python _sd */
+        rk_i128 q = t < 0 ? -((-t) / z) : t / z; /* symmetric divide, == Python _sd */
         out[r] = (int64_t)q;
     }
 }
@@ -221,10 +384,10 @@ long qsm_gemv_exact_mt(int64_t * restrict out, const uint8_t * restrict xbar,
  * identical values (D9 kernels may use hardware multiply); Python's arbitrary-precision e^|x| in
  * exp_fixed only ever appears as a DIVISOR (2^(2f)/acc or 2^(2f)/(one+acc)), so any acc above
  * 2^(2f) yields quotient 0 — the kernel saturates acc at 2^(2f+8), which is exactly equivalent.
- * All intermediates that can exceed 63 bits go through __int128; >> on negatives is arithmetic
+ * All intermediates that can exceed 63 bits go through rk_i128; >> on negatives is arithmetic
  * (floor), matching Python. */
 
-static inline int64_t sdiv_i128(__int128 n, int64_t d) {      /* truncate toward zero, == _sdiv */
+static inline int64_t sdiv_i128(rk_i128 n, int64_t d) {      /* truncate toward zero, == _sdiv */
     return n < 0 ? -(int64_t)((-n) / d) : (int64_t)(n / d);
 }
 
@@ -239,14 +402,14 @@ static int64_t exp_fixed_c(int64_t x, int frac) {             /* == ract.exp_fix
     while (red > half) { red >>= 1; m++; }
     int64_t term = one, acc = one;
     for (int k = 1; k <= 12; k++) {
-        term = (int64_t)(((__int128)term * red) >> frac);
+        term = (int64_t)(((rk_i128)term * red) >> frac);
         term = term / k;                                      /* term >= 0: floor == trunc */
         acc += term;
         if (term == 0) break;
     }
     for (int i = 0; i < m; i++) {
         if (acc >= clamp) { acc = clamp; continue; }          /* saturated: stays saturated */
-        acc = (int64_t)(((__int128)acc * acc) >> frac);
+        acc = (int64_t)(((rk_i128)acc * acc) >> frac);
         if (acc >= clamp) acc = clamp;
     }
     if (neg) acc = ((int64_t)1 << (frac + frac)) / acc;       /* e^-|x| = 1/e^|x|, both >= 0 */
@@ -266,21 +429,21 @@ static int64_t tanh_fixed_c(int64_t x, int frac) {            /* == ract.tanh_fi
 
 static int64_t gelu_tanh_c(int64_t x, int frac) {             /* == gemma4.gelu_tanh_fixed */
     const int64_t one = (int64_t)1 << frac;
-    int64_t x2 = (int64_t)(((__int128)x * x) >> frac);
-    int64_t x3 = (int64_t)(((__int128)x2 * x) >> frac);
-    int64_t cube = sdiv_i128((__int128)44715 * x3, 1000000);          /* 0.044715·x³ */
+    int64_t x2 = (int64_t)(((rk_i128)x * x) >> frac);
+    int64_t x3 = (int64_t)(((rk_i128)x2 * x) >> frac);
+    int64_t cube = sdiv_i128((rk_i128)44715 * x3, 1000000);          /* 0.044715·x³ */
     int64_t inner = x + cube;
-    int64_t arg = sdiv_i128((__int128)7978846 * inner, 10000000);     /* √(2/π)·inner */
+    int64_t arg = sdiv_i128((rk_i128)7978846 * inner, 10000000);     /* √(2/π)·inner */
     int64_t t = tanh_fixed_c(arg, frac);
     int64_t half = (one + t) >> 1;
-    return (int64_t)(((__int128)x * half) >> frac);
+    return (int64_t)(((rk_i128)x * half) >> frac);
 }
 
 /* out[i] = (gelu_tanh(g[i]) * u[i]) >> frac — the whole gated-FFN activation in one block call. */
 void gelu_mul_block(int64_t * restrict out, const int64_t * restrict g,
                     const int64_t * restrict u, long n, int frac) {
     for (long i = 0; i < n; i++)
-        out[i] = (int64_t)(((__int128)gelu_tanh_c(g[i], frac) * u[i]) >> frac);
+        out[i] = (int64_t)(((rk_i128)gelu_tanh_c(g[i], frac) * u[i]) >> frac);
 }
 
 /* Elementwise sigmoid block — == ract.sigmoid_fixed for EVERY input (the divisor saturation is
@@ -298,9 +461,9 @@ void exp_block(int64_t * restrict out, const int64_t * restrict x, long n, int f
         out[i] = exp_fixed_c(x[i], frac);
 }
 
-static uint64_t isqrt_c(unsigned __int128 m) {                /* == rn.isqrt, digit-by-digit */
+static uint64_t isqrt_c(rk_u128 m) {                /* == rn.isqrt, digit-by-digit */
     if (m == 0) return 0;
-    unsigned __int128 x = 0, c = 1;
+    rk_u128 x = 0, c = 1;
     while (c <= (m >> 2)) c <<= 2;    /* wrap-proof: (c << 2) <= m overflows to 0 for m >= 2^126
                                        * and spins forever; shifting m down instead cannot wrap */
     while (c != 0) {
@@ -314,19 +477,19 @@ static uint64_t isqrt_c(unsigned __int128 m) {                /* == rn.isqrt, di
 /* RMSNorm block: x / isqrt(mean(x²)+eps) · w, all Q<frac> — == ract.rmsnorm_fixed. */
 void rmsnorm_block(int64_t * restrict out, const int64_t * restrict x,
                    const int64_t * restrict w, long n, int frac, int64_t eps) {
-    __int128 ssq = 0;                                         /* int64 wrapped on huge-but-legit
+    rk_i128 ssq = 0;                                         /* int64 wrapped on huge-but-legit
                                                                * Q<frac> activations (|x| ~ 2^45,
                                                                * Soliton y_prenorm); exact to |x|
                                                                * < 2^58 at n <= 2^7 — host guards */
     for (long i = 0; i < n; i++)
-        ssq += ((__int128)x[i] * x[i]) >> frac;               /* per-element shift, then sum */
-    __int128 ms = ssq / n + eps;                              /* ssq >= 0: floor == trunc */
-    int64_t rms = (int64_t)isqrt_c((unsigned __int128)ms << frac);
+        ssq += ((rk_i128)x[i] * x[i]) >> frac;               /* per-element shift, then sum */
+    rk_i128 ms = ssq / n + eps;                              /* ssq >= 0: floor == trunc */
+    int64_t rms = (int64_t)isqrt_c((rk_u128)ms << frac);
     if (rms == 0) rms = 1;
     const int64_t one = (int64_t)1 << frac;
     for (long i = 0; i < n; i++) {
-        int64_t norm = sdiv_i128((__int128)x[i] * one, rms);  /* == (x<<frac)/rms, sign-safe */
-        out[i] = sdiv_i128((__int128)norm * w[i], one);
+        int64_t norm = sdiv_i128((rk_i128)x[i] * one, rms);  /* == (x<<frac)/rms, sign-safe */
+        out[i] = sdiv_i128((rk_i128)norm * w[i], one);
     }
 }
 
@@ -345,12 +508,12 @@ static void bridge_rows(bridge_job *j) {
     /* int32 fast path (x32 != NULL): max|x| < 2^31 holds for every real Q16 activation, so
      * products are <= 2^38 and the int64 accumulator is exact for K <= 2^25 — and the widening
      * u8->i32 multiply-accumulate VECTORIZES (NEON smlal / AVX2 pmuldq). Four partial
-     * accumulators keep the MLA pipes full. Falls back to the scalar __int128 accumulator when
+     * accumulators keep the MLA pipes full. Falls back to the scalar rk_i128 accumulator when
      * the range check fails (same exact dot). */
     const long K = j->K;
     for (long r = j->r0; r < j->r1; r++) {
         const uint8_t * restrict w = j->xbar + (size_t)r * K;
-        __int128 acc;
+        rk_i128 acc;
         if (j->x32) {
             const int32_t * restrict x = j->x32;
             int64_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
@@ -368,10 +531,10 @@ static void bridge_rows(bridge_job *j) {
             const int64_t * restrict x = j->x;
             acc = 0;
             for (long k = 0; k < K; k++)
-                acc += (__int128)((int64_t)w[k] - 128) * x[k];
+                acc += (rk_i128)((int64_t)w[k] - 128) * x[k];
         }
         long s = j->s_row[r];
-        __int128 t = s >= 0 ? (acc << s) : (acc >> (-s));
+        rk_i128 t = s >= 0 ? (acc << s) : (acc >> (-s));
         int64_t z = j->z_row[r] ? j->z_row[r] : 1;
         j->out[r] = (int64_t)(t < 0 ? -((-t) / z) : t / z);
     }
@@ -397,7 +560,7 @@ void add_into(int64_t * restrict dst, const int64_t * restrict a,
 
 void scale_q16(int64_t * restrict h, int64_t sc, long n, int frac) {  /* h = (h·sc) >> frac */
     for (long i = 0; i < n; i++)
-        h[i] = (int64_t)(((__int128)h[i] * sc) >> frac);
+        h[i] = (int64_t)(((rk_i128)h[i] * sc) >> frac);
 }
 
 /* RMSNorm over `rows` independent rows of length n sharing gamma w (per-head Q/K/V norms use
@@ -415,7 +578,7 @@ static inline int64_t f16_fixed(uint16_t h, int shift);
 void embed_row_block(int64_t * restrict out, const uint16_t * restrict row,
                      long n, int64_t esc, int frac) {
     for (long i = 0; i < n; i++)
-        out[i] = (int64_t)(((__int128)f16_fixed(row[i], frac) * esc) >> frac);
+        out[i] = (int64_t)(((rk_i128)f16_fixed(row[i], frac) * esc) >> frac);
 }
 
 static void *bridge_worker(void *arg) { bridge_rows((bridge_job *)arg); return NULL; }
@@ -469,8 +632,8 @@ long qsm_gemv_bridge_mt(int64_t * restrict out, const uint8_t * restrict xbar,
  * computes ALL query heads, thread-split over heads (disjoint ctx rows — merge-free). */
 
 static int64_t dot_q16(const int64_t * restrict a, const int64_t * restrict b, long n, int frac) {
-    __int128 acc = 0;                                 /* == infer.dot: exact Σ a·b, then >> frac */
-    for (long i = 0; i < n; i++) acc += (__int128)a[i] * b[i];
+    rk_i128 acc = 0;                                 /* == infer.dot: exact Σ a·b, then >> frac */
+    for (long i = 0; i < n; i++) acc += (rk_i128)a[i] * b[i];
     return (int64_t)(acc >> frac);
 }
 
@@ -489,8 +652,8 @@ static void attn_head(int64_t * restrict ctx, const int64_t * restrict qh,
     for (long j = 0; j < nkeys; j++) sw[j] = dot_q16(qh, kh + j * hd, hd, frac);
     softmax_c(sw, nkeys, frac);
     for (long d = 0; d < hd; d++) {                   /* Σ w·v exact, ONE final >> frac */
-        __int128 acc = 0;
-        for (long j = 0; j < nkeys; j++) acc += (__int128)sw[j] * vh[j * hd + d];
+        rk_i128 acc = 0;
+        for (long j = 0; j < nkeys; j++) acc += (rk_i128)sw[j] * vh[j * hd + d];
         ctx[d] = (int64_t)(acc >> frac);
     }
 }
@@ -552,10 +715,10 @@ void rope_block(int64_t * restrict vec, const int64_t * restrict cos_row,
         int64_t * restrict v = vec + h * hd;
         for (long i = 0; i < n_rot; i++) {
             int64_t v0 = v[i], v1 = v[i + pair_off], c = cos_row[i], s = sin_row[i];
-            v[i]            = (int64_t)(((__int128)v0 * c) >> frac)
-                            - (int64_t)(((__int128)v1 * s) >> frac);
-            v[i + pair_off] = (int64_t)(((__int128)v0 * s) >> frac)
-                            + (int64_t)(((__int128)v1 * c) >> frac);
+            v[i]            = (int64_t)(((rk_i128)v0 * c) >> frac)
+                            - (int64_t)(((rk_i128)v1 * s) >> frac);
+            v[i + pair_off] = (int64_t)(((rk_i128)v0 * s) >> frac)
+                            + (int64_t)(((rk_i128)v1 * c) >> frac);
         }
     }
 }
@@ -618,3 +781,7 @@ long lm_argmax_file(const int32_t * restrict hidden, const char *path, long off,
     munmap(base, map_len);
     return bi;
 }
+
+#ifdef RK_EXTERN_C_OPEN
+}   /* extern "C" (Windows C++ build) */
+#endif

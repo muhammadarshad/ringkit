@@ -12,3 +12,4 @@ from . import nn                            # engineer-facing model framework (t
 from . import data                          # engineer-facing data plumbing (encode/split/batch)
 from . import rlearn                        # classical ML, ring-native (sklearn-shaped)
 from . import emulation                      # EMULATION ENGINE (traditional models: checkpoint/onix/infer/ract) — SEPARATE from the pure ring nn
+from .device import device, devices, default_device, Device   # .device() backend selection (cpu/cpu+simd/cuda/metal)

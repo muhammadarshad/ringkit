@@ -35,14 +35,21 @@ class Gemma4Weights:
         # MAP_PRIVATE (copy-on-write, never written) so the buffer is writable-typed: the GEMV
         # block kernel then reads tensor slabs IN PLACE via zero-copy memoryviews — no Python
         # copies of weight memory, per the kit's C-owned-block model.
-        self._onix = mmap.mmap(self._of.fileno(), 0, flags=mmap.MAP_PRIVATE)
+        # Cross-platform copy-on-write map: POSIX MAP_PRIVATE; Windows ACCESS_COPY (same COW
+        # semantics — writable-typed buffer, never actually written, backing file untouched).
+        if hasattr(mmap, "MAP_PRIVATE"):
+            self._onix = mmap.mmap(self._of.fileno(), 0, flags=mmap.MAP_PRIVATE)
+        else:
+            self._onix = mmap.mmap(self._of.fileno(), 0, access=mmap.ACCESS_COPY)
         self._onix_mv = memoryview(self._onix)
         if os.environ.get("RINGKIT_GEMV") == "metal":     # GPU GEMV: map the onix once (no-copy)
             from ringkit.kernels.mprc.gemma import host as _gh
             _gh.metal_register_onix(self._onix)
         self._sz_cache = {}                  # cache only tiny s_row/z_row per tensor; slice xbar on demand
         self._ef = open(embed_path, "rb")
-        self._emb = mmap.mmap(self._ef.fileno(), 0, prot=mmap.PROT_READ)
+        self._emb = (mmap.mmap(self._ef.fileno(), 0, prot=mmap.PROT_READ)
+                     if hasattr(mmap, "PROT_READ")
+                     else mmap.mmap(self._ef.fileno(), 0, access=mmap.ACCESS_READ))
         self._embed_path = embed_path
         self._norms, self._qk, self._final = self._parse_norms(norms_path)
         self._scalars = self._parse_scalars(scalars_path)
@@ -171,8 +178,12 @@ def _f32_bits_to_fixed(bits, frac):
 
 def default_paths():
     """Locate the Gemma4-12B files; returns (onix, embed, norms, scalars) or None if unreachable."""
-    onix_cands = [os.path.expanduser("~/Projects/hpq-kernel-rust/gemma4_12b.onix")]
-    w12 = [os.path.expanduser("~/Projects/mprc-scratchpad/hpq_kernel/weights_12b")]
+    onix_cands = [os.path.expanduser("~/Projects/hpq-kernel-rust/gemma4_12b.onix"),
+                  r"F:\models\weights_12b\gemma4_12b.onix",          # this box (spec-complete ONIX)
+                  os.environ.get("GEMMA4_ONIX", "")]
+    w12 = [os.path.expanduser("~/Projects/mprc-scratchpad/hpq_kernel/weights_12b"),
+           r"F:\models\weights_12b",
+           os.environ.get("GEMMA4_W12", "")]
     onix_p = next((p for p in onix_cands if os.path.exists(p)), None)
     w12_p = next((p for p in w12 if os.path.isdir(p)), None)
     if not onix_p or not w12_p:

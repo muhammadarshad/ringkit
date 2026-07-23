@@ -24,7 +24,22 @@ def ring_distance(a, b):
 
 def scores(Q, K):
     """Content-similarity score matrix. score(i,j) = -sum_d ring_distance(Q_i[d], K_j[d]).
-    Higher (closer to 0) = better match. Signed ENERGY values (no mod fold)."""
+    Higher (closer to 0) = better match. Signed ENERGY values (no mod fold).
+
+    This IS the GEVHV operator's role in place of the Q·Kᵀ gemm (GEVHV_MATH.md: bind→react→measure
+    — bind is the position gauge applied upstream, react is identity for plain attention, and this
+    is the MEASURE stage over every (query,key) pair). It routes through the GEVHV silicon kernel
+    (kernels/rust gevhv_scores, gated bit-for-bit at host load) and falls back to the exact
+    multiplier-free ring loop below when no backend serves — the loop is the semantic reference."""
+    if Q and K:
+        dim = len(Q[0])
+        if all(len(r) == dim for r in Q) and all(len(r) == dim for r in K):
+            from ringkit.kernels.cpu_rust import host as _rh
+            flat = _rh.gevhv_scores(
+                [v for r in Q for v in r], [v for r in K for v in r], len(Q), len(K), dim)
+            if flat is not None:
+                nk = len(K)
+                return [flat[i * nk:(i + 1) * nk] for i in range(len(Q))]
     S = []
     for qi in Q:
         row = []

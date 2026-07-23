@@ -115,7 +115,21 @@ def gemm(A, B, M, K, N, variant="mul", out=None):
     except Exception:
         pass
     lib = _load()
-    if lib is None or variant not in VARIANTS:
+    if lib is None:
+        # No C toolchain (e.g. Windows): serve the multiplier-free arc GEMM from the Rust
+        # backend (GEVHV Theorem C shift-add + B1 fold, gated bit-for-bit at its host load).
+        try:
+            from ringkit.kernels.cpu_rust import host as _rust
+            r = _rust.gevhv_gemm_arc(A, B, M, K, N)
+            if r is not None:
+                if out is not None:
+                    out[:] = r
+                    return out
+                return bytearray(r)
+        except Exception:
+            pass
+        return None
+    if variant not in VARIANTS:
         return None
     Ab = A if isinstance(A, bytearray) else bytearray(A)
     Bb = B if isinstance(B, bytearray) else bytearray(B)

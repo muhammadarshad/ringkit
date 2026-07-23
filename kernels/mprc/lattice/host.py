@@ -8,12 +8,21 @@ observables (correlation / mean_action) whose normalized outputs are floats — 
 MEASUREMENT IO, not ring quantities. Charter D9: this layer uses hardware ops on purpose
 and is excluded from the semantic AST audit.
 
+The Rust path (SPEC-014 "CPU = Rust") is pure PyO3 — no C ABI, no ctypes.CDLL of a Rust
+cdylib: this host `import`s the `ring_rust` extension module (kernels/rust) directly and
+calls its return-based functions. Some call sites (this module's own public wrappers below,
+plus tests/test_gauge.py and tests/test_metal.py) still use the raw (pointer, dims)
+mutate-in-place calling convention gauge.c's ctypes binding exposes; `_RustGaugeShim` below
+preserves that EXACT call surface — translating pointer-in/pointer-out to ring_rust's
+list-in/list-out — so no caller of `_load()`'s result needs to know which backend is behind it.
+
 The physics-facing semantic surface is ringkit.physics.gauge, which re-exports these forms.
 """
 import ctypes
 import os
 import subprocess
 from ringkit.kernels.backend import _arch_flags, _BUILD, so_path
+from ringkit.kernels.cpu_rust import host as _rust_host
 
 # CPU threads for the *_mt kernels: bins are predictable (checkerboard slabs own disjoint
 # sites; boundary reads are opposite-parity) so threads run lock-free with no merge step.
@@ -45,6 +54,8 @@ def build():
 
 
 def _bind(lib):
+    """Bind ctypes argtypes for the C `gauge.c` path only (cc-built .so, real FFI). The Rust
+    path is pure PyO3 (imported, not ctypes-bound) — see `_RustGaugeShim`."""
     for name in ("plaquette", "plaquette_blocked"):
         fn = getattr(lib, name)
         fn.argtypes = [_U8, _U8, ctypes.c_long, ctypes.c_long, ctypes.c_long]
@@ -76,6 +87,56 @@ def _bind(lib):
     return lib
 
 
+class _RustGaugeShim:
+    """Legacy ctypes-shaped facade over the imported `ring_rust` PyO3 module (SPEC-014: no C in
+    Rust, no ctypes ABI to the Rust crate). `_load()` callers, tests/test_gauge.py, and
+    tests/test_metal.py poke the returned `_lib` with the raw (pointer, dims) mutate-in-place
+    convention gauge.c's ctypes binding exposes; this facade preserves that EXACT surface while
+    the real computation runs through ring_rust's pure-PyO3, return-based functions. Pointer
+    arguments are the ctypes array views `_ptr()` produces (zero-copy over a bytearray):
+    `bytes(ptr)` reads them, slice-assignment (`ptr[:] = ...`) writes them back in place."""
+
+    def __init__(self, rr):
+        self.rr = rr
+
+    def plaquette(self, e_ptr, g_ptr, w, h, d):
+        _write_back(e_ptr, self.rr.plaquette(bytes(g_ptr), w, h, d))
+
+    def plaquette_blocked(self, e_ptr, g_ptr, w, h, d):
+        _write_back(e_ptr, self.rr.plaquette_blocked(bytes(g_ptr), w, h, d))
+
+    def plaquette_mt(self, e_ptr, g_ptr, w, h, d, nthreads):
+        _write_back(e_ptr, self.rr.plaquette_mt(bytes(g_ptr), w, h, d, nthreads))
+
+    def metropolis_sweep(self, grid_ptr, prop_ptr, chance_ptr, lut_ptr, w, h, d, parity):
+        _write_back(grid_ptr, self.rr.metropolis_sweep(bytes(grid_ptr), bytes(prop_ptr),
+                                                        bytes(chance_ptr), bytes(lut_ptr),
+                                                        w, h, d, parity))
+
+    def metropolis_sweep_rng(self, grid_ptr, seed, sweep, lut_ptr, w, h, d, parity):
+        _write_back(grid_ptr, self.rr.metropolis_sweep_rng(bytes(grid_ptr), seed, sweep,
+                                                            bytes(lut_ptr), w, h, d, parity))
+
+    def metropolis_sweep_mt(self, grid_ptr, prop_ptr, chance_ptr, lut_ptr, w, h, d, parity, nthreads):
+        _write_back(grid_ptr, self.rr.metropolis_sweep_mt(bytes(grid_ptr), bytes(prop_ptr),
+                                                           bytes(chance_ptr), bytes(lut_ptr),
+                                                           w, h, d, parity, nthreads))
+
+    def metropolis_sweep_rng_mt(self, grid_ptr, seed, sweep, lut_ptr, w, h, d, parity, nthreads):
+        _write_back(grid_ptr, self.rr.metropolis_sweep_rng_mt(bytes(grid_ptr), seed, sweep,
+                                                               bytes(lut_ptr), w, h, d, parity, nthreads))
+
+    def action_sums(self, g_ptr, w, h, d, tot_ref, n_ref):
+        tot, n = self.rr.action_sums(bytes(g_ptr), w, h, d)
+        ctypes.cast(tot_ref, ctypes.POINTER(ctypes.c_long))[0] = tot
+        ctypes.cast(n_ref, ctypes.POINTER(ctypes.c_long))[0] = n
+
+    def correlation_sums(self, g_ptr, r, w, h, d, tot_ref, n_ref):
+        tot, n = self.rr.correlation_sums(bytes(g_ptr), r, w, h, d)
+        ctypes.cast(tot_ref, ctypes.POINTER(ctypes.c_long))[0] = tot
+        ctypes.cast(n_ref, ctypes.POINTER(ctypes.c_long))[0] = n
+
+
 def _threads_for(n):
     return NTHREADS if n >= MT_MIN_NODES else 1
 
@@ -91,8 +152,34 @@ def _load():
         if not os.path.exists(_SO) or os.path.getmtime(_SO) < os.path.getmtime(_C):
             build()
         _lib = _bind(ctypes.CDLL(_SO))
+        return _lib
+    except Exception:
+        pass
+    # No working C toolchain (e.g. Windows: no `cc` on PATH) -> the `ring_rust` PyO3 extension
+    # module (kernels/rust, SPEC-014 "CPU = Rust", pure PyO3 — no C in Rust) exposes the same
+    # ops as plain Python functions, gated by a load-time bit-for-bit self-test against the
+    # pure-Python reference below (D9) before `_lib` may point at it (wrapped in the legacy
+    # ctypes-shaped `_RustGaugeShim` so every existing call site keeps working unchanged).
+    try:
+        import ring_rust
+    except ImportError:
+        try:
+            _rust_host.build()
+            import ring_rust  # noqa: F811 - retry the import after building
+        except Exception:
+            _lib = None
+            return None
     except Exception:
         _lib = None
+        return None
+    try:
+        if not _rust_selftest(ring_rust):
+            _lib = None
+            return None
+    except Exception:
+        _lib = None
+        return None
+    _lib = _RustGaugeShim(ring_rust)
     return _lib
 
 
@@ -102,6 +189,14 @@ def available():
 
 def _ptr(ba):
     return (ctypes.c_uint8 * len(ba)).from_buffer(ba)
+
+
+def _write_back(ptr_obj, data):
+    """Bulk zero-copy write of `data` (Python `bytes`, from ring_rust) into a ctypes array view
+    (mutates its backing bytearray in place). NOTE: `ptr_obj[:] = data` looks equivalent but is a
+    slow per-element ctypes path (measured ~100x slower on a 3.7M-byte lattice) — casting through
+    a `memoryview` routes it through the buffer protocol's bulk memcpy instead."""
+    memoryview(ptr_obj).cast("B")[:] = data
 
 
 def _py_plaquette(g, W, H, D):
@@ -329,6 +424,9 @@ def correlation(grid, R, W, H, D):
     1 = perfectly aligned (ordered), ~0.5 = random, 0 = anti-aligned. Ring-distance based;
     the normalized value is a float MEASUREMENT output (IO), not a ring quantity."""
     lib = _load()
+    if isinstance(lib, _RustGaugeShim):
+        tot, n = lib.rr.correlation_sums(bytes(grid), R, W, H, D)
+        return tot / (n * 128) if n else 0.0
     if lib is not None:
         gb = grid if isinstance(grid, bytearray) else bytearray(grid)
         tot = ctypes.c_long(0); n = ctypes.c_long(0)
@@ -375,6 +473,9 @@ def mean_action(grid, W, H, D):
     """Average local ring-action (sum of neighbor ring-distances) — order parameter.
     Low = ordered/aligned (cold), high = disordered (hot). Float MEASUREMENT output (IO)."""
     lib = _load()
+    if isinstance(lib, _RustGaugeShim):
+        tot, n = lib.rr.action_sums(bytes(grid), W, H, D)
+        return tot / n if n else 0
     if lib is not None:
         gb = grid if isinstance(grid, bytearray) else bytearray(grid)
         tot = ctypes.c_long(0); n = ctypes.c_long(0)
@@ -393,3 +494,108 @@ def mean_action(grid, W, H, D):
                 tot += cd(grid[c], grid[c+1]) + cd(grid[c], grid[c+W]) + cd(grid[c], grid[c+sk])
                 n += 3
     return tot / n if n else 0
+
+
+def _py_action_sums(g, W, H, D):
+    """Reference of record for action_sums's (tot, n) — same accumulation `mean_action`'s
+    Python branch runs, exposed standalone so `_rust_selftest` can check the reduction op."""
+    sk = W * H
+    def cd(a, b):
+        d = (a - b) & 0xFF
+        return d if d < 256 - d else 256 - d
+    tot = 0; n = 0
+    for k in range(1, D - 1):
+        for j in range(1, H - 1):
+            base = k * sk + j * W
+            for i in range(1, W - 1):
+                c = base + i
+                tot += cd(g[c], g[c+1]) + cd(g[c], g[c+W]) + cd(g[c], g[c+sk])
+                n += 3
+    return tot, n
+
+
+def _py_correlation_sums(g, R, W, H, D):
+    """Reference of record for correlation_sums's (tot, n) — same accumulation `correlation`'s
+    Python branch runs, exposed standalone so `_rust_selftest` can check the reduction op."""
+    sk = W * H
+    def cd(a, b):
+        d = (a - b) & 0xFF
+        return d if d < 256 - d else 256 - d
+    tot = 0; n = 0
+    for k in range(1, D - 1):
+        for j in range(1, H - 1):
+            base = k * sk + j * W
+            for i in range(1, W - 1 - R):
+                c = base + i
+                tot += 128 - cd(g[c], g[c + R])
+                n += 1
+    return tot, n
+
+
+def _rust_selftest(rr):
+    """D9 load-time gate for the Rust lattice backend (SPEC-014): every op must reproduce the
+    pure-Python reference (`_py_plaquette` / `_py_sweep` / `_py_sweep_rng` / `_py_action_sums` /
+    `_py_correlation_sums` above — the judge tests/test_gauge.py itself checks the C path
+    against) BIT-FOR-BIT before `_lib` may point at this module. Calls `ring_rust` directly with
+    `bytes` (zero-copy `&[u8]` on the Rust side — passing `list(...)` here would both fail the
+    type check and box every element) since this is OUR call site, not a legacy ctypes poke."""
+    import random as _random
+    rnd = _random.Random(4242)
+    W, H, D = 6, 5, 9
+    n = W * H * D
+    g = bytes(rnd.randrange(256) for _ in range(n))
+    gb = bytearray(g)
+
+    # plaquette / plaquette_blocked / plaquette_mt(2) vs the Python reference
+    want_e = _py_plaquette(gb, W, H, D)
+    for fn, extra in ((rr.plaquette, ()), (rr.plaquette_blocked, ()), (rr.plaquette_mt, (2,))):
+        got = fn(g, W, H, D, *extra)
+        if got != want_e:
+            return False
+
+    # metropolis_sweep / metropolis_sweep_mt(nt) for nt in (1, 3), both parities
+    prop = bytes(rnd.randrange(256) for _ in range(n))
+    chance = bytes(rnd.randrange(256) for _ in range(n))
+    lut = bytes(max(0, 255 - d) for d in range(256))
+    want_g = bytearray(gb)
+    _py_sweep(want_g, prop, chance, lut, W, H, D, 0)
+    _py_sweep(want_g, prop, chance, lut, W, H, D, 1)
+
+    got1 = g
+    for parity in (0, 1):
+        got1 = rr.metropolis_sweep(got1, prop, chance, lut, W, H, D, parity)
+    if got1 != want_g:
+        return False
+    for nt in (1, 3):
+        got_g = g
+        for parity in (0, 1):
+            got_g = rr.metropolis_sweep_mt(got_g, prop, chance, lut, W, H, D, parity, nt)
+        if got_g != want_g:
+            return False
+
+    # metropolis_sweep_rng / metropolis_sweep_rng_mt(nt) vs the derived-RNG Python reference
+    want_r = bytearray(gb)
+    for s in (0, 1):
+        _py_sweep_rng(want_r, 999, s, lut, W, H, D, 0)
+        _py_sweep_rng(want_r, 999, s, lut, W, H, D, 1)
+    got_r = g
+    for s in (0, 1):
+        for parity in (0, 1):
+            got_r = rr.metropolis_sweep_rng(got_r, 999, s, lut, W, H, D, parity)
+    if got_r != want_r:
+        return False
+    for nt in (1, 3):
+        got_rmt = g
+        for s in (0, 1):
+            for parity in (0, 1):
+                got_rmt = rr.metropolis_sweep_rng_mt(got_rmt, 999, s, lut, W, H, D, parity, nt)
+        if got_rmt != want_r:
+            return False
+
+    # action_sums / correlation_sums (integer reductions) vs the Python reference
+    if rr.action_sums(g, W, H, D) != _py_action_sums(gb, W, H, D):
+        return False
+    if rr.correlation_sums(g, 1, W, H, D) != _py_correlation_sums(gb, 1, W, H, D):
+        return False
+
+    return True

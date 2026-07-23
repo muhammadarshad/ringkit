@@ -62,12 +62,30 @@ def _arch_flags():
     return ["-arch", platform.machine()] if sys.platform == "darwin" else ["-march=native"]
 
 
+# PE exports for the Windows build (cl exports NOTHING by default): exactly the
+# ctypes-bound names below. Keep in sync with _load().
+_EXPORTS = ["qsm_dot", "qsm_gemv_exact", "qsm_gemv_exact_mt", "qsm_gemv_bridge_mt",
+            "gelu_mul_block", "sigmoid_block", "exp_block", "rmsnorm_block", "attn_block",
+            "rope_block", "add_into", "scale_q16", "rmsnorm_rows", "embed_row_block",
+            "rk_narrow32", "lm_argmax", "lm_argmax_file"]
+
+
 def _build():
     os.makedirs(_BUILD, exist_ok=True)
     so = os.path.join(_BUILD, f"qsm_energy-{platform.machine()}.so")
     if not os.path.exists(so) or os.path.getmtime(_C) > os.path.getmtime(so):
-        subprocess.run(["cc", "-O3", "-funroll-loops", "-shared", "-fPIC", *_arch_flags(), "-o", so, _C],
-                       check=True, capture_output=True)
+        if platform.system() == "Windows":
+            # MSVC: cl via the vcvars env (the nvidia host's helper), /LD -> PE DLL.
+            from ringkit.kernels.nvidia.cuda.host import _msvc_env
+            # shell=True so cl resolves from the vcvars PATH in env (CreateProcess
+            # would otherwise search the PARENT's PATH and miss cl.exe).
+            cmd = " ".join(["cl", "/nologo", "/O2", "/TP", "/LD", f'"{_C}"', f'/Fe:"{so}"',
+                            "/link"] + [f"/EXPORT:{n}" for n in _EXPORTS])
+            subprocess.run(cmd, env=_msvc_env(), check=True, capture_output=True,
+                           text=True, cwd=_BUILD, shell=True)
+        else:
+            subprocess.run(["cc", "-O3", "-funroll-loops", "-shared", "-fPIC", *_arch_flags(), "-o", so, _C],
+                           check=True, capture_output=True)
     return so
 
 
@@ -183,14 +201,82 @@ def _py_gemv_exact(xbar, x, M, K, s_row, z_row, frac):
     return out
 
 
+_cuda_gate = None   # None = ungated; True after the first-call bit-for-bit pass; False = refused
+_cuda_slabs = {}    # slab mmap address -> device handle (pinned, uploaded once)
+_cuda_slab_bytes = 0
+_CUDA_SLAB_BUDGET = int(6.5 * (1 << 30))   # 8 GB card, headroom for activations/scratch
+
+
+def _cuda_gemv_exact(xbar, x, M, K, s_row, z_row, frac):
+    """Windows GPU route: ring_cuda's rk_gemv_u8_exact over the raw u8 slab. Gated
+    D9 on FIRST use: bit-for-bit vs `_py_gemv_exact` on a fixed pseudo-random case
+    (both shift signs, odd z) — refused permanently on any mismatch."""
+    global _cuda_gate
+    if _cuda_gate is False:
+        return None
+    try:
+        from ringkit.kernels.nvidia.cuda import host as ch
+    except Exception:
+        _cuda_gate = False
+        return None
+    if not ch.available():
+        _cuda_gate = False
+        return None
+    if _cuda_gate is None:
+        import random
+        rng = random.Random(7)
+        # ADVERSARIAL magnitudes (the 64-bit wrap that slipped a tame gate:
+        # layer-4 |h| diverged 56.8% before this case existed): outlier-scale
+        # activations, all-extreme weight rows, big positive shifts.
+        Mg, Kg = 9, 4096
+        xb = bytearray(rng.randrange(256) for _ in range((Mg - 2) * Kg)) \
+            + bytearray([255] * Kg) + bytearray([0] * Kg)
+        xg = [rng.randrange(-(1 << 30), 1 << 30) for _ in range(Kg)]
+        sg = [rng.randrange(-8, 8) for _ in range(Mg - 2)] + [14, 14]
+        zg = [rng.randrange(1, 128) | 1 for _ in range(Mg)]
+        want = _py_gemv_exact(xb, xg, Mg, Kg, sg, zg, frac)
+        got = ch.gemv_u8_exact(xb, xg, Mg, Kg, sg, zg)
+        _cuda_gate = (got == want)
+        if not _cuda_gate:
+            return None
+    # PINNED-SLAB RESIDENCY: the decode walk is deterministic (0→47 every
+    # token), so a slab uploaded once is reused every token. Pin slabs on-device
+    # up to the VRAM budget (measured 8 GB card; leave headroom); the overflow
+    # tail streams per call as before. Keyed by the slab's stable mmap address.
+    global _cuda_slabs, _cuda_slab_bytes
+    try:
+        if isinstance(xbar, memoryview) and not xbar.readonly:
+            xb = (ctypes.c_uint8 * (M * K)).from_buffer(xbar)
+        elif isinstance(xbar, bytearray):
+            xb = (ctypes.c_uint8 * (M * K)).from_buffer(xbar)
+        else:
+            xb = None
+    except (TypeError, ValueError):
+        xb = None
+    if xb is not None:
+        addr = ctypes.addressof(xb)
+        h = _cuda_slabs.get(addr)
+        if h is None and _cuda_slab_bytes + M * K <= _CUDA_SLAB_BUDGET:
+            h = ch.slab_upload(xb, M * K)
+            if h:
+                _cuda_slabs[addr] = h
+                _cuda_slab_bytes += M * K
+        if h:
+            out = ch.gemv_u8_exact_res(h, x, M, K, s_row, z_row)
+            if out is not None:
+                return out
+    return ch.gemv_u8_exact(xbar, x, M, K, s_row, z_row)
+
+
 def gemv_exact(xbar, x, M, K, s_row, z_row, frac):
     """Fused exact digit-decomposition GEMV (the whole proj) in ONE C block call over the weight
     slab. `xbar` may be a writable memoryview into the onix mmap (ZERO-COPY — C reads the slab in
     place, the kit's C-owned-memory model) or bytes/bytearray. Returns Q<frac> int list, or None
-    when the C kernel is unavailable (caller falls back to the Python semantic reference)."""
+    when the C kernel is unavailable (caller falls back to the Python semantic reference).
+    On Windows (no `cc`) the ring_cuda GPU route serves the same op, D9-gated at first use."""
     lib = _load()
     if lib is None:
-        return None
+        return _cuda_gemv_exact(xbar, x, M, K, s_row, z_row, frac)
     try:
         if isinstance(xbar, memoryview) and not xbar.readonly:
             xb_arr = (ctypes.c_uint8 * (M * K)).from_buffer(xbar)      # zero-copy, in-place read
@@ -714,10 +800,18 @@ def lm_argmax_file(hidden, path, off, V, H, shift=13):
             return bi, best[0]
     import mmap as _m
     with open(path, "rb") as f:
-        mm = _m.mmap(f.fileno(), 0, prot=_m.PROT_READ)
-        seq = memoryview(mm)[off:off + V * H * 2].cast("H")
-        r = _py_lm_argmax(hidden, seq, V, H, shift)
-        mm.close()
+        if hasattr(_m, "PROT_READ"):
+            mm = _m.mmap(f.fileno(), 0, prot=_m.PROT_READ)
+        else:                                   # Windows: no PROT_*, use access=
+            mm = _m.mmap(f.fileno(), 0, access=_m.ACCESS_READ)
+        mv = memoryview(mm)
+        seq = mv[off:off + V * H * 2].cast("H")
+        try:
+            r = _py_lm_argmax(hidden, seq, V, H, shift)
+        finally:
+            seq.release()                       # exported views must go before close
+            mv.release()
+            mm.close()
     return r
 
 

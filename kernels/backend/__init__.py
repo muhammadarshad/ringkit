@@ -40,6 +40,8 @@ _metal = None
 _metal_tried = False
 _cuda = None
 _cuda_tried = False
+_rust = None
+_rust_tried = False
 
 
 def so_path(stem):
@@ -95,6 +97,33 @@ def _load():
     except Exception:
         _lib = None
     return _lib
+
+
+def _load_rust():
+    """The Rust cdylib (kernels/rust, host kernels/cpu_rust/host.py) — the CPU tier's fallback
+    when no C toolchain is available (SPEC-014 "CPU = Rust", fixes `available()`/`cpu-c` on
+    Windows where `cc` isn't on PATH). Gated by the SAME bit-for-bit self-test as the C path
+    (D9) before it may serve; `active()`/`backends()` report it under the "cpu-c" tier alongside
+    the C .so — whichever toolchain built it, the CPU tier is verified identically."""
+    global _rust, _rust_tried
+    if _rust is not None or _rust_tried:
+        return _rust
+    _rust_tried = True
+    try:
+        from ringkit.kernels.cpu_rust import host as rh
+        if not rh.available():
+            return None
+
+        def _call(op, out, a, b, n):
+            if rh.elementwise(op, out, a, b, n) != 0:
+                raise RuntimeError("rust elementwise dispatch failed")
+
+        if not _selftest(_call):
+            return None
+        _rust = rh
+    except Exception:
+        _rust = None
+    return _rust
 
 
 def _load_metal():
@@ -169,8 +198,9 @@ def ew_mt(name, a, b, out=None, nthreads=NTHREADS):
 
 
 def available():
-    """True iff the compiled C SIMD path is loaded, self-tested, and usable."""
-    return _load() is not None
+    """True iff ANY binary CPU backend — the compiled C SIMD path, or the Rust cdylib
+    fallback (SPEC-014) when no C toolchain is present — is loaded, self-tested, and usable."""
+    return _load() is not None or _load_rust() is not None
 
 
 def _load_cuda():
@@ -192,20 +222,28 @@ def _load_cuda():
 
 
 def backends():
-    """Status of every registered backend: name -> 'serving' | 'unavailable'."""
+    """Status of every registered backend: name -> 'serving' | 'unavailable'. "cpu-c" is the
+    CPU tier (C .so if built, else the Rust cdylib, SPEC-014); "rust" reports which binary
+    actually backs that tier, for diagnostics (D6 honesty: don't hide which toolchain served)."""
+    cpu_c = _load() is not None
+    rust = _load_rust() is not None
     return {"metal": "serving" if _load_metal() is not None else "unavailable",
             "cuda": "serving" if _load_cuda() is not None else "unavailable",
-            "cpu-c": "serving" if _load() is not None else "unavailable",
+            "cpu-c": "serving" if (cpu_c or rust) else "unavailable",
+            "rust": "serving" if rust else "unavailable",
             "python": "serving"}
 
 
 def active(n=0):
-    """Which backend serves a buffer of `n` elements under the current policy."""
+    """Which backend serves a buffer of `n` elements under the current policy. The CPU tier
+    ("cpu-c") is C when built, else the Rust cdylib (SPEC-014) — both bit-for-bit self-tested
+    (D9) — checked ahead of the CUDA/Metal GPU tiers so a CPU-native binary always wins the
+    elementwise trio when one is available (matches the C path's pre-existing priority)."""
     if METAL_MIN is not None and n >= METAL_MIN and _load_metal() is not None:
         return "metal"
-    if _load() is not None:
+    if _load() is not None or _load_rust() is not None:
         return "cpu-c"
-    if _load_cuda() is not None:                 # GPU serves elementwise when the C path is absent
+    if _load_cuda() is not None:                 # GPU serves elementwise when the CPU tier is absent
         return "cuda"
     return "python"
 
@@ -234,17 +272,24 @@ def elementwise(name, a, b, unroll=False):
     ab = a if isinstance(a, bytearray) else bytearray(a)
     bb = b if isinstance(b, bytearray) else bytearray(b)
     which = active(n)
+    _cpu_up = _load() is not None or _load_rust() is not None    # C, else Rust (SPEC-014)
     if which == "metal":
         if name.endswith("_u64"):                               # metal has no unroll variants
-            which = "cpu-c" if _load() is not None else "python"
+            which = "cpu-c" if _cpu_up else "python"
         elif _metal.elementwise(base, out, ab, bb, n) == 0:
             return out
         else:
-            which = "cpu-c" if _load() is not None else "python"    # dispatch failed -> fall through
+            which = "cpu-c" if _cpu_up else "python"    # dispatch failed -> fall through
     if which == "cpu-c":
-        fn = getattr(_lib, name if name.endswith("_u64") else base)
-        fn(_ptr(out), _ptr(ab), _ptr(bb), n)
-        return out
+        if _load() is not None:
+            fn = getattr(_lib, name if name.endswith("_u64") else base)
+            fn(_ptr(out), _ptr(ab), _ptr(bb), n)
+            return out
+        if not name.endswith("_u64"):             # Rust doesn't expose the _u64 unroll variants
+            rust = _load_rust()
+            if rust is not None and rust.elementwise(base, out, ab, bb, n) == 0:
+                return out
+        # C absent, Rust absent/failed, or an unroll variant requested without C -> Python below
     if which == "cuda":
         if _cuda.elementwise(base, out, ab, bb, n) == 0:        # GPU (when the C path is absent)
             return out

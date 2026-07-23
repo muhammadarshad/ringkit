@@ -74,12 +74,29 @@ def _linear_c(x, W, b, M, K, frac):
     return [(acc[j] >> frac) + b[j] for j in range(M)]
 
 
+def _linear_cuda(x, W, b, M, K, frac):
+    """Same y = (W·x >> frac) + b through the CUDA exact-int GEMV (int64 ENERGY accumulation). The
+    >>frac rescale and bias add happen HERE in Python (arbitrary precision), so the result is
+    BIT-IDENTICAL to the shift-add loop. Returns None (caller -> Python) when CUDA is absent or the
+    inputs/accumulation fall outside the int32/int64 safe range. This is the GPU fast path on boxes
+    where the C backend is unavailable (e.g. no `cc` on Windows); on Macs the C path serves first."""
+    from ringkit.kernels.nvidia.cuda import host as _ch
+    acc = _ch.gemv_i64(W, x, M, K)
+    if acc is None:
+        return None
+    return [(acc[j] >> frac) + b[j] for j in range(M)]
+
+
 def linear(x, W, b, out_features, in_features, frac):
     """y = W·x + b in ring fixed-point. x/W/b are signed Q<frac> integers; W is row-major flat
     (out_features * in_features). Product Q<2·frac> accumulated in ENERGY, rescaled >>frac to Q<frac>.
-    Shift-add only — no float, no '*'. Large tensors run as gated C block calls (bit-identical)."""
+    Shift-add only — no float, no '*'. Large tensors run as gated C (else CUDA) block calls, both
+    bit-identical to the loop."""
     if rn.mul(out_features, in_features) >= _C_MIN_WORK:
         y = _linear_c(x, W, b, out_features, in_features, frac)
+        if y is not None:
+            return y
+        y = _linear_cuda(x, W, b, out_features, in_features, frac)
         if y is not None:
             return y
     y = []

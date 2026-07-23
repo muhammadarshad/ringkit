@@ -119,7 +119,11 @@ for _M, _K in ((128, 128), (400, 128)):
 check("infer.linear C route == pure-Python shift-add reference (bit-for-bit)", _ok)
 
 # ==================== SOLITON (Mamba2 gate_lat2d) ====================
+import glob as _g0
 mcands = [os.path.expanduser("~/Projects/vlm-transformers/huggingface/exported/qcm-rp2k-cloud-matched-results/full_mamba2_L2_k2384_h16_gate_lat2d_best.pth")]
+mcands += _g0.glob(os.path.expanduser(                       # HF-cache path (hf download), any OS
+    "~/.cache/huggingface/hub/models--marshadbits--qcm-rp2k-cloud-matched-results/"
+    "snapshots/*/full_mamba2_L2_k2384_h16_gate_lat2d_best.pth"))
 MPATH = next((p for p in mcands if os.path.exists(p)), None)
 if MPATH is not None:
     from ringkit import quanta as Q
